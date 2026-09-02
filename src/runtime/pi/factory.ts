@@ -17,7 +17,7 @@ export interface FactoryDeps {
   toolGatewayFor: (lease: RunLease) => ToolGateway;
   chooseDecide: TurnChooser;
   chooseExecute: TurnChooser;
-  getMaxTurns: () => { decide: number; execute: number };
+  getMaxTurns: () => { decide: number; execute: number; tools?: number };
   kali?: KaliRuntime;
   liveStream?: PiStreamFn;
 }
@@ -135,6 +135,8 @@ export class PiWorker implements WorkerRuntime {
         turns += 1;
         if (finishRequested) return true;
         if (turns >= maxTurns) return true;
+        const toolCap = this.deps.getMaxTurns().tools ?? 24;
+        if ((this.toolGateway?.toolSends ?? 0) >= toolCap) return true;
         return false;
       },
     });
@@ -236,21 +238,30 @@ export class PiWorker implements WorkerRuntime {
     ];
     if (this.mode === "decide") {
       tools.push(
-        tool("propose_plan", "Submit typed plan batch", Type.Object({
+        tool("propose_plan", "Submit typed plan. Decide cannot fetch URLs. Use propose_step so Execute can kali_run/playwright. Example: {\"operations\":[{\"op\":\"propose_step\",\"question\":\"GET the challenge homepage and record the HTML\",\"kind\":\"explore\",\"methodFamily\":\"http-probe\"}]}", Type.Object({
           operations: Type.Array(Type.Unknown()),
           no_change_reason: Type.Optional(Type.String()),
         }), async (_id, params) => {
           const p = params as { operations: unknown[]; no_change_reason?: string };
-          const result = s.applyProposalBatch({
-            campaign_id: lease.campaign_id,
-            producer_id: lease.run_id,
-            submission_id: newId("sub"),
-            run_id: lease.run_id,
-            operations: p.operations,
-            no_change_reason: p.no_change_reason,
-            read_set: context.manifest.selected_entity_revisions,
-          });
-          return ok(result);
+          try {
+            const result = s.applyProposalBatch({
+              campaign_id: lease.campaign_id,
+              producer_id: lease.run_id,
+              submission_id: newId("sub"),
+              run_id: lease.run_id,
+              operations: p.operations,
+              no_change_reason: p.no_change_reason,
+              read_set: context.manifest.selected_entity_revisions,
+            });
+            return ok(result);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify({ error: message, allowed_ops: ["propose_step"], hint: "Do not invent HTTP ops. propose_step then finish_decision." }) }],
+              details: { error: message },
+              isError: true,
+            };
+          }
         }),
         tool("finish_decision", "Finish decide run", Type.Object({
           summary: Type.String(),

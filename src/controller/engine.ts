@@ -86,12 +86,14 @@ export class Engine {
           live?.providerId ?? "scripted",
           live?.reserveTokens ?? 16,
         ),
-      toolGatewayFor: (lease) => new ToolGateway(this.storage, this.budget, this.invocations, lease, this.dispatchGate),
+      toolGatewayFor: (lease) =>
+        new ToolGateway(this.storage, this.budget, this.invocations, lease, this.dispatchGate, this.config.max_tool_calls_per_run),
       chooseDecide: options.chooseDecide ?? decideChooser(),
       chooseExecute: options.chooseExecute ?? executeChooser(),
       getMaxTurns: () => ({
         decide: this.config.max_decide_turns,
         execute: this.config.max_execute_turns_per_run,
+        tools: this.config.max_tool_calls_per_run,
       }),
       kali: this.kali,
       liveStream: live?.stream,

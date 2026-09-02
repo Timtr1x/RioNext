@@ -444,6 +444,24 @@ test("hints land in the next context pack", () => {
   e.close();
 });
 
+test("httpReq-style propose_plan becomes a ready step", () => {
+  const dir = tmp();
+  const e = boot(dir, "coerce-http");
+  const run = e.storage.claimDecide("coerce-http", "t")!;
+  const result = e.storage.applyProposalBatch({
+    campaign_id: "coerce-http",
+    producer_id: run.run_id,
+    submission_id: "http1",
+    run_id: run.run_id,
+    operations: [{ op: "httpReq", url: "http://b147.example/" }],
+  });
+  assert.ok(result.canonical_ids.step_id);
+  const step = e.storage.list("steps", "coerce-http")[0]!;
+  assert.equal(step.status, "ready");
+  assert.match(String(step.question), /b147.example/);
+  e.close();
+});
+
 test("inspectWorld does not leak hidden sample_id on desk inspect", () => {
   const r = inspectWorld(freshWorld(), "desk");
   assert.equal(JSON.stringify(r.observation).includes("SAMPLE-42"), false);

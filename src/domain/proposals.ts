@@ -4,10 +4,11 @@ import { ALLOWED_PROPOSAL_OPS, type CampaignState, type ProposalOp } from "./typ
 const FORBIDDEN_ROOT_MUTATIONS = new Set(["set_root_goal", "enlarge_budget", "enlarge_scope", "complete_campaign"]);
 
 export function parseProposalOps(input: unknown): ProposalOp[] {
-  if (!Array.isArray(input)) {
+  const list = Array.isArray(input) ? input : input && typeof input === "object" ? [input] : null;
+  if (!list) {
     throw new DomainError("proposal_not_array", "proposal operations must be an array", "invalid_input");
   }
-  return input.map((item, index) => parseOne(item, index));
+  return list.map((item, index) => parseOne(item, index));
 }
 
 function parseOne(item: unknown, index: number): ProposalOp {
@@ -15,23 +16,26 @@ function parseOne(item: unknown, index: number): ProposalOp {
     throw new DomainError("proposal_op_invalid", `operation ${index} is not an object`, "invalid_input");
   }
   const raw = item as Record<string, unknown>;
-  const op = raw.op;
-  if (typeof op !== "string") {
+  const opName =
+    typeof raw.op === "string" && raw.op
+      ? raw.op
+      : typeof raw.question === "string" && raw.question
+        ? "propose_step"
+        : "";
+  if (!opName) {
     throw new DomainError("proposal_op_missing", `operation ${index} missing op`, "invalid_input");
   }
-  if (FORBIDDEN_ROOT_MUTATIONS.has(op) || op === "complete_campaign" || op === "sql" || op === "json_patch") {
-    throw new DomainError("proposal_op_forbidden", `operation ${op} is not allowed`, "denied", { op });
+  if (FORBIDDEN_ROOT_MUTATIONS.has(opName) || opName === "complete_campaign" || opName === "sql" || opName === "json_patch") {
+    throw new DomainError("proposal_op_forbidden", `operation ${opName} is not allowed`, "denied", { op: opName });
   }
-  if (!(ALLOWED_PROPOSAL_OPS as string[]).includes(op)) {
-    throw new DomainError("proposal_op_unknown", `unknown operation ${op}`, "invalid_input", { op });
+  if (!(ALLOWED_PROPOSAL_OPS as string[]).includes(opName)) {
+    return coerceUnknownToStep(raw, opName);
   }
+  const op = opName as ProposalOp["op"];
   switch (op) {
     case "propose_step": {
-      const step = raw.step;
-      if (!step || typeof step !== "object") {
-        throw new DomainError("propose_step_invalid", "propose_step requires step", "invalid_input");
-      }
-      return { op, step: step as ProposalOp extends { op: "propose_step" } ? ProposalOp["step"] : never };
+      const stepRaw = raw.step && typeof raw.step === "object" ? (raw.step as Record<string, unknown>) : raw;
+      return { op, step: fillStep(stepRaw) };
     }
     case "revise_step_priority":
       return {
@@ -95,6 +99,49 @@ function parseOne(item: unknown, index: number): ProposalOp {
     default:
       throw new DomainError("proposal_op_unknown", `unknown operation ${op}`, "invalid_input");
   }
+}
+
+function coerceUnknownToStep(raw: Record<string, unknown>, op: string): ProposalOp {
+  const url = typeof raw.url === "string" ? raw.url : typeof raw.target === "string" ? raw.target : "";
+  const question =
+    (typeof raw.question === "string" && raw.question) ||
+    (url && `${op} ${url}`) ||
+    (typeof raw.path === "string" && `${op} ${raw.path}`) ||
+    `Investigate authorized target using ${op}`;
+  return { op: "propose_step", step: fillStep({ ...raw, question, methodFamily: slug(op) }) };
+}
+
+function fillStep(raw: Record<string, unknown>): ProposalOp extends { op: "propose_step" } ? ProposalOp["step"] : never {
+  const question = typeof raw.question === "string" && raw.question ? raw.question : "inspect authorized target";
+  const kind = raw.kind === "verify" || raw.kind === "reconcile" || raw.kind === "acquire_prerequisite" || raw.kind === "explore" ? raw.kind : "explore";
+  const methodFamily =
+    (typeof raw.methodFamily === "string" && raw.methodFamily) ||
+    (typeof raw.method_family === "string" && raw.method_family) ||
+    slug(question);
+  return {
+    question,
+    kind,
+    methodFamily,
+    expectedObservations: Array.isArray(raw.expectedObservations)
+      ? (raw.expectedObservations as string[])
+      : Array.isArray(raw.expected_observations)
+        ? (raw.expected_observations as string[])
+        : [],
+    completionCriteria: typeof raw.completionCriteria === "string" ? raw.completionCriteria : typeof raw.completion_criteria === "string" ? raw.completion_criteria : "observe",
+    preconditions: (raw.preconditions as ProposalOp extends { op: "propose_step" } ? ProposalOp["step"]["preconditions"] : never) ?? { op: "all", of: [] },
+    goalRefs: Array.isArray(raw.goalRefs) ? (raw.goalRefs as string[]) : Array.isArray(raw.goal_refs) ? (raw.goal_refs as string[]) : [],
+    inputRefs: Array.isArray(raw.inputRefs) ? (raw.inputRefs as never) : Array.isArray(raw.input_refs) ? (raw.input_refs as never) : [],
+    resourceClaims: Array.isArray(raw.resourceClaims) ? (raw.resourceClaims as never) : [],
+    budgetHint: (raw.budgetHint as never) ?? {},
+    fingerprint: typeof raw.fingerprint === "string" ? raw.fingerprint : undefined,
+    reopenRule: (raw.reopenRule as never) ?? (raw.reopen_rule as never) ?? { kind: "always" },
+    branchId: typeof raw.branchId === "string" ? raw.branchId : typeof raw.branch_id === "string" ? raw.branch_id : undefined,
+  } as ProposalOp extends { op: "propose_step" } ? ProposalOp["step"] : never;
+}
+
+function slug(s: string): string {
+  const t = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return (t || "explore").slice(0, 40);
 }
 
 function reqStr(raw: Record<string, unknown>, key: string): string {

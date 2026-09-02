@@ -1391,6 +1391,10 @@ export class StorageService {
         if (!step.question || !step.kind || !step.methodFamily) {
           throw invalidInput("step_incomplete", "propose_step missing fields");
         }
+        const already = Number(
+          (this.store.db.prepare("SELECT COUNT(*) AS c FROM steps WHERE campaign_id = ? AND source_run_id = ?").get(campaignId, runId) as { c: number }).c,
+        );
+        if (already >= 8) return camp.event_head;
         const fp =
           step.fingerprint ??
           createHash("sha256")

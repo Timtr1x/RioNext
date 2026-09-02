@@ -169,6 +169,7 @@ export class ToolGateway {
     private readonly invocations: InvocationBook,
     private readonly lease: RunLease,
     private readonly dispatchGate?: DispatchGate,
+    private readonly maxToolCalls = 24,
   ) {}
 
   closeAdmission(): void {
@@ -202,6 +203,12 @@ export class ToolGateway {
     const pathDenied = guardToolArgs(this.storage, this.lease.campaign_id, req.args);
     if (pathDenied) {
       return { invocation_id: "none", blocked: true, reason: pathDenied, allowed: false };
+    }
+    const used = Number(
+      (this.storage.store.db.prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND kind = 'tool'").get(this.lease.run_id) as { c: number }).c,
+    );
+    if (used >= this.maxToolCalls) {
+      return { invocation_id: "none", blocked: true, reason: "run_tool_cap", allowed: false };
     }
     if (req.envTool) {
       if (!this.dispatchGate) {

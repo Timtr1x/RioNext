@@ -42,6 +42,24 @@ test("model cannot submit complete_campaign op", () => {
   assert.throws(() => parseProposalOps([{ op: "recommend_state", state: "completed", reason: "done" }]));
 });
 
+test("unknown HTTP-ish proposal ops coerce to propose_step", () => {
+  const ops = parseProposalOps([
+    { op: "httpReq", url: "http://lab.example/" },
+    { op: "propose_step", question: "GET homepage HTML", methodFamily: "http-probe" },
+  ]);
+  assert.equal(ops.length, 2);
+  assert.equal(ops[0]!.op, "propose_step");
+  if (ops[0]!.op === "propose_step") {
+    assert.match(ops[0]!.step.question, /http:\/\/lab.example/);
+    assert.equal(ops[0]!.step.kind, "explore");
+  }
+  assert.equal(ops[1]!.op, "propose_step");
+  if (ops[1]!.op === "propose_step") {
+    assert.equal(ops[1]!.step.question, "GET homepage HTML");
+    assert.equal(ops[1]!.step.methodFamily, "http-probe");
+  }
+});
+
 test("assessment with untested mandatory coverage cannot close", () => {
   const r = evaluateCompletion({
     mode: "assessment",
