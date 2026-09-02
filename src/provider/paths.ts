@@ -20,8 +20,16 @@ export function completeBaseUrl(raw: string, protocol: Protocol): string {
   if (path.endsWith(want) || path.endsWith(want.replace(/\/+$/, ""))) {
     return `${url.origin}${path}`;
   }
+  const leaf = want.split("/").filter(Boolean).slice(-2).join("/");
+  if (leaf && path.endsWith(`/${leaf}`)) {
+    return `${url.origin}${path}`;
+  }
   if (path === "" || path === "/" || path === "/v1") {
     return `${url.origin}${want}`;
+  }
+  // Qianfan v2 (generic and Token Plan personal/team) is OpenAI-compat under /v2, not /v1.
+  if (protocol === "OPENAI_CHAT_COMPLETIONS" && (path === "/v2" || path.startsWith("/v2/"))) {
+    return `${url.origin}${path}/chat/completions`;
   }
   if (path.endsWith("/v1")) {
     return `${url.origin}${path}${want.slice("/v1".length)}`;

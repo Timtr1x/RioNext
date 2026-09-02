@@ -352,7 +352,7 @@ export class PiWorker implements WorkerRuntime {
           s.saveWorld(lease.campaign_id, result.world);
           return ok(result);
         }),
-        tool("kali_run", "Run an allowlisted Kali binary in the campaign container. nmap/nuclei/katana and other scanners return immediately with execution_id and keep running in the container (up to 30 min). Do not poll; finish_step. bash/sh/python3 run /workspace scripts or bash -c.", Type.Object({
+        tool("kali_run", "Run an allowlisted Kali binary in the campaign container. nmap/nuclei/katana and other scanners return immediately with execution_id and keep running in the container (up to 60 min). Do not poll; finish_step. bash/sh/python3 run /workspace scripts or bash -c.", Type.Object({
           kind: Type.Literal("kali"),
           bin: Type.String(),
           args: Type.Array(Type.String()),

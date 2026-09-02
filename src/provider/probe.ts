@@ -125,7 +125,7 @@ async function runOnce(
   const label = name ?? `text:${req.thinking ?? "off"}${req.tools ? "+tools" : ""}`;
   try {
     const body = buildProtocolBody(protocol, req);
-    const res = await postJson({ url, protocol, apiKey, body, fetchFn, timeoutMs: 20_000 });
+    const res = await postJson({ url, protocol, apiKey, body, fetchFn, timeoutMs: 60_000 });
     const text = extractText(protocol, res.json);
     return {
       name: label,

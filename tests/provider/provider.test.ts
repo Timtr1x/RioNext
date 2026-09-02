@@ -28,6 +28,26 @@ test("baseUrl auto-completes protocol paths and does not double-append", () => {
   );
   assert.equal(completeBaseUrl("https://api.anthropic.com", "ANTHROPIC_MESSAGES"), "https://api.anthropic.com/v1/messages");
   assert.equal(completeBaseUrl("https://api.openai.com/v1", "OPENAI_RESPONSES"), "https://api.openai.com/v1/responses");
+  assert.equal(
+    completeBaseUrl("https://qianfan.baidubce.com/v2", "OPENAI_CHAT_COMPLETIONS"),
+    "https://qianfan.baidubce.com/v2/chat/completions",
+  );
+  assert.equal(
+    completeBaseUrl("https://qianfan.baidubce.com/v2/chat/completions", "OPENAI_CHAT_COMPLETIONS"),
+    "https://qianfan.baidubce.com/v2/chat/completions",
+  );
+  assert.equal(
+    completeBaseUrl("https://qianfan.baidubce.com/v2/tokenplan/personal", "OPENAI_CHAT_COMPLETIONS"),
+    "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions",
+  );
+  assert.equal(
+    completeBaseUrl("https://qianfan.baidubce.com/v2/tokenplan/team", "OPENAI_CHAT_COMPLETIONS"),
+    "https://qianfan.baidubce.com/v2/tokenplan/team/chat/completions",
+  );
+  assert.equal(
+    completeBaseUrl("https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions", "OPENAI_CHAT_COMPLETIONS"),
+    "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions",
+  );
 });
 
 test("vision inferred from name and override wins", () => {

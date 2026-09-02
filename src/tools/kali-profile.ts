@@ -121,7 +121,7 @@ export const DEFAULT_KALI_LIMITS = {
   pids: 512,
   maxOutputBytes: 1_000_000,
   maxRuntimeMs: 60_000,
-  maxBackgroundRuntimeMs: 30 * 60_000,
+  maxBackgroundRuntimeMs: 60 * 60_000,
   pollIntervalMs: 2_000,
   maxWorkspaceBytes: 512_000_000,
   ratePerHost: 20,
