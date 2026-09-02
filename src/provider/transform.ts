@@ -168,6 +168,18 @@ export function extractText(protocol: Protocol, json: unknown): string {
   return JSON.stringify(obj).slice(0, 2000);
 }
 
+export function extractUsage(json: unknown): { input: number; output: number; totalTokens: number } {
+  if (!json || typeof json !== "object") return { input: 0, output: 0, totalTokens: 0 };
+  const obj = json as Record<string, unknown>;
+  const usage = obj.usage;
+  if (!usage || typeof usage !== "object") return { input: 0, output: 0, totalTokens: 0 };
+  const u = usage as Record<string, unknown>;
+  const input = Number(u.input_tokens ?? u.prompt_tokens ?? u.input ?? 0) || 0;
+  const output = Number(u.output_tokens ?? u.completion_tokens ?? u.output ?? 0) || 0;
+  const total = Number(u.total_tokens ?? input + output) || input + output;
+  return { input, output, totalTokens: total };
+}
+
 export function extractToolCall(protocol: Protocol, json: unknown): boolean {
   if (!json || typeof json !== "object") return false;
   const obj = json as Record<string, unknown>;

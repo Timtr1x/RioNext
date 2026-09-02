@@ -77,6 +77,12 @@ export interface EntityRef {
   revision: number;
 }
 
+export interface ReadSetEntry {
+  table: string;
+  id: string;
+  revision: number;
+}
+
 export interface Actor {
   kind: ActorKind;
   id: string;

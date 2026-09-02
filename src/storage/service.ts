@@ -21,6 +21,7 @@ import type {
   FindingStatus,
   PredicateExpr,
   ProposalOp,
+  ReadSetEntry,
   StepKind,
   StepStatus,
   SubmitFactResultStatus,
@@ -333,13 +334,92 @@ export class StorageService {
 
   async putArtifact(campaignId: string, body: string | Buffer, mime: string, producerAttempt?: string): Promise<StoredArtifact> {
     const stored = await this.artifacts.put(campaignId, body, mime);
-    this.store.db
-      .prepare(
-        `INSERT OR IGNORE INTO artifacts(id, campaign_id, hash, size, mime, path, producer_attempt, integrity_state, truncated, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'complete', 0, ?)`,
-      )
-      .run(stored.id, campaignId, stored.hash, stored.size, stored.mime, stored.path, producerAttempt ?? null, nowIso());
+    this.commitArtifact(stored, producerAttempt);
     return stored;
+  }
+
+  commitArtifact(stored: StoredArtifact, producerAttempt?: string): void {
+    this.store.transaction(() => {
+      this.store.db
+        .prepare(
+          `INSERT OR IGNORE INTO artifacts(id, campaign_id, hash, size, mime, path, producer_attempt, integrity_state, truncated, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'complete', 0, ?)`,
+        )
+        .run(stored.id, stored.campaign_id, stored.hash, stored.size, stored.mime, stored.path, producerAttempt ?? null, nowIso());
+    });
+  }
+
+  listArtifacts(campaignId: string): Record<string, unknown>[] {
+    return this.store.db.prepare("SELECT * FROM artifacts WHERE campaign_id = ?").all(campaignId) as Record<string, unknown>[];
+  }
+
+  scanOrphanArtifacts(campaignId: string): {
+    path: string;
+    hash: string | null;
+    incomplete: boolean;
+    registered: boolean;
+  }[] {
+    const registered = new Set(
+      this.listArtifacts(campaignId)
+        .map((r) => String(r.path))
+        .concat(this.listArtifacts(campaignId).map((r) => String(r.hash))),
+    );
+    return this.artifacts.listOnDisk(campaignId).map((d) => ({
+      path: d.path,
+      hash: d.hash,
+      incomplete: d.incomplete,
+      registered: registered.has(d.path) || (d.hash !== null && registered.has(d.hash)),
+    }));
+  }
+
+  reclaimOrphans(campaignId: string): { reclaimed: number; incomplete: number } {
+    let reclaimed = 0;
+    let incomplete = 0;
+    for (const row of this.scanOrphanArtifacts(campaignId)) {
+      if (row.incomplete) {
+        incomplete += 1;
+        continue;
+      }
+      if (row.registered || !row.hash) continue;
+      if (!this.artifacts.verify(row.path, row.hash)) {
+        incomplete += 1;
+        continue;
+      }
+      const disk = this.artifacts.listOnDisk(campaignId).find((d) => d.path === row.path);
+      this.store.db
+        .prepare(
+          `INSERT OR IGNORE INTO artifacts(id, campaign_id, hash, size, mime, path, producer_attempt, integrity_state, truncated, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NULL, 'orphan', 0, ?)`,
+        )
+        .run(`art_${row.hash}`, campaignId, row.hash, disk?.size ?? 0, "application/octet-stream", row.path, nowIso());
+      this.store.db.prepare("UPDATE artifacts SET integrity_state = 'orphan' WHERE id = ? AND integrity_state != 'complete'").run(`art_${row.hash}`);
+      reclaimed += 1;
+    }
+    return { reclaimed, incomplete };
+  }
+
+  snapshotReadSet(campaignId: string, refs: { table: string; id: string }[]): ReadSetEntry[] {
+    const allowed = new Set(["goals", "steps", "facts", "findings", "coverage_items", "observations"]);
+    return refs.map((r) => {
+      if (!allowed.has(r.table)) throw invalidInput("read_set_table", `table ${r.table} is not in a decide read-set`);
+      const row = this.store.db
+        .prepare(`SELECT revision FROM ${r.table} WHERE id = ? AND campaign_id = ?`)
+        .get(r.id, campaignId) as { revision: number } | undefined;
+      if (!row) throw invalidInput("read_set_missing", `${r.table} ${r.id} not in campaign`);
+      return { table: r.table, id: r.id, revision: row.revision };
+    });
+  }
+
+  readSetConflicts(campaignId: string, readSet: ReadSetEntry[]): ReadSetEntry | null {
+    const allowed = new Set(["goals", "steps", "facts", "findings", "coverage_items", "observations"]);
+    for (const entry of readSet) {
+      if (!allowed.has(entry.table)) return entry;
+      const row = this.store.db
+        .prepare(`SELECT revision FROM ${entry.table} WHERE id = ? AND campaign_id = ?`)
+        .get(entry.id, campaignId) as { revision: number } | undefined;
+      if (!row || row.revision !== entry.revision) return entry;
+    }
+    return null;
   }
 
   recordObservation(args: {
@@ -674,17 +754,29 @@ export class StorageService {
     run_id: string;
     operations: unknown;
     no_change_reason?: string;
+    read_set?: ReadSetEntry[];
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
       const camp = this.getCampaign(args.campaign_id);
+      if (args.read_set && args.read_set.length > 0) {
+        const conflictEntry = this.readSetConflicts(args.campaign_id, args.read_set);
+        if (conflictEntry) {
+          throw conflict("read_set_conflict", "relevant entity revision changed", {
+            table: conflictEntry.table,
+            id: conflictEntry.id,
+            expected_revision: conflictEntry.revision,
+          });
+        }
+      }
+      const readSetJson = asJson(args.read_set ?? []);
       const ops = parseProposalOps(args.operations);
       if (ops.length === 0) {
         const seq = camp.event_head;
         this.store.db
           .prepare(
-            "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, '[]', '[]', 1, ?, ?, ?)",
+            "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, '[]', 1, ?, ?, ?)",
           )
-          .run(newId("dec"), args.campaign_id, args.run_id, camp.requested_seq, args.no_change_reason ?? "no_change", nowIso());
+          .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, camp.requested_seq, args.no_change_reason ?? "no_change", nowIso());
         this.store.db
           .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = empty_reviews + 1, updated_at = ? WHERE id = ?")
           .run(nowIso(), args.campaign_id);
@@ -698,9 +790,9 @@ export class StorageService {
       }
       this.store.db
         .prepare(
-          "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, '[]', ?, 1, ?, NULL, ?)",
+          "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, NULL, ?)",
         )
-        .run(newId("dec"), args.campaign_id, args.run_id, asJson(ops), this.getCampaign(args.campaign_id).requested_seq, nowIso());
+        .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, asJson(ops), this.getCampaign(args.campaign_id).requested_seq, nowIso());
       this.store.db
         .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = 0, updated_at = ? WHERE id = ?")
         .run(nowIso(), args.campaign_id);
@@ -932,7 +1024,7 @@ export class StorageService {
   }
 
   list(table: string, campaignId: string): Record<string, unknown>[] {
-    const allowed = new Set(["steps", "facts", "findings", "events", "observations", "coverage_items", "task_runs", "invocations", "goals"]);
+    const allowed = new Set(["steps", "facts", "findings", "events", "observations", "coverage_items", "task_runs", "invocations", "goals", "artifacts"]);
     if (!allowed.has(table)) throw denied("table_not_allowed", table);
     return this.store.db.prepare(`SELECT * FROM ${table} WHERE campaign_id = ? ORDER BY rowid`).all(campaignId) as Record<
       string,
@@ -1244,9 +1336,19 @@ export class StorageService {
   private refsExist(campaignId: string, ids: string[]): boolean {
     for (const id of ids) {
       const obs = this.store.db.prepare("SELECT campaign_id FROM observations WHERE id = ?").get(id) as { campaign_id: string } | undefined;
-      const art = this.store.db.prepare("SELECT campaign_id FROM artifacts WHERE id = ?").get(id) as { campaign_id: string } | undefined;
+      const art = this.store.db
+        .prepare("SELECT campaign_id, path, hash, integrity_state, truncated FROM artifacts WHERE id = ?")
+        .get(id) as
+        | { campaign_id: string; path: string; hash: string; integrity_state: string; truncated: number }
+        | undefined;
       const fact = this.store.db.prepare("SELECT campaign_id FROM facts WHERE id = ?").get(id) as { campaign_id: string } | undefined;
-      const hit = obs ?? art ?? fact;
+      if (art) {
+        if (art.campaign_id !== campaignId) throw denied("cross_campaign_ref", "reference belongs to another campaign");
+        if (art.integrity_state !== "complete" || art.truncated) return false;
+        if (!this.artifacts.verify(art.path, art.hash)) return false;
+        continue;
+      }
+      const hit = obs ?? fact;
       if (!hit) return false;
       if (hit.campaign_id !== campaignId) throw denied("cross_campaign_ref", "reference belongs to another campaign");
     }

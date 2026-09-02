@@ -17,6 +17,7 @@ import { PiWorkerFactory, type PiWorker } from "../runtime/pi/factory.ts";
 import type { TurnChooser } from "../runtime/pi/scripted-stream.ts";
 import { FileEffectAdapter, type EffectAdapter } from "../tools/effect-adapter.ts";
 import { ArtifactStore } from "../storage/artifacts.ts";
+import { backupStore, restoreStore, type BackupReport, type RestoreReport } from "../storage/backup.ts";
 import { Store } from "../storage/db.ts";
 import { StorageService } from "../storage/service.ts";
 import { freshWorld, oracleGoalSatisfied, type LabWorld } from "../tools/synthetic.ts";
@@ -385,9 +386,22 @@ export class Engine {
     };
   }
 
+  async backupTo(destDir: string): Promise<BackupReport> {
+    return backupStore({
+      db: this.storage.store.db,
+      dbPath: this.storage.store.path,
+      artifactRoot: this.config.artifact_root,
+      destDir,
+    });
+  }
+
   close(): void {
     this.storage.close();
   }
+}
+
+export function restoreEngineData(backupDir: string, destDir: string): RestoreReport {
+  return restoreStore({ backupDir, destDir });
 }
 
 function boundedConclusion(spec: CampaignSpec, world: LabWorld, coverage: Record<string, unknown>[]): string {

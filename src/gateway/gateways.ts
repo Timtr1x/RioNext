@@ -79,6 +79,7 @@ export class ModelGateway {
     private readonly inner: StreamFn,
     private readonly lease: RunLease,
     private readonly modelId: string,
+    private readonly providerName = "scripted",
   ) {}
 
   closeAdmission(): void {
@@ -109,7 +110,7 @@ export class ModelGateway {
       cancel_epoch: this.lease.cancel_epoch,
       prompt_hash: hashJson({ system: context.systemPrompt, n: context.messages.length }),
       requested_model: this.modelId,
-      provider: "scripted",
+      provider: this.providerName,
       reserved_calls: 1,
       reserved_tokens: 16,
     });
@@ -119,9 +120,15 @@ export class ModelGateway {
     this.modelSends += 1;
     try {
       const stream = this.inner(model, context, options);
-      return wrapSettle(stream, () => {
-        this.invocations.mark(inv.id, "completed", { actual_tokens: 16 });
-        this.budget.settle(this.lease.campaign_id, inv.id, 1, 16, 0, 1, 16, 0);
+      return wrapSettle(stream, (msg) => {
+        const tokens = Number(msg.usage?.totalTokens ?? 16);
+        const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
+        this.invocations.mark(inv.id, failed ? "failed_known" : "completed", {
+          actual_tokens: tokens,
+          error: msg.errorMessage ?? undefined,
+          status: msg.stopReason,
+        });
+        this.budget.settle(this.lease.campaign_id, inv.id, 1, tokens, 0, 1, tokens, 0);
       }, (err) => {
         this.invocations.mark(inv.id, "failed_known", { error: String(err) });
         this.budget.settle(this.lease.campaign_id, inv.id, 1, 16, 0, 1, 16, 0);
@@ -238,7 +245,7 @@ function errorStream(model: Model<string>, message: string): AssistantMessageEve
 
 function wrapSettle(
   stream: AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
-  onOk: () => void,
+  onOk: (msg: { usage?: { totalTokens?: number }; stopReason?: string; errorMessage?: string | null }) => void,
   onErr: (e: unknown) => void,
 ): AssistantMessageEventStream | Promise<AssistantMessageEventStream> {
   if (stream && typeof (stream as Promise<AssistantMessageEventStream>).then === "function") {
@@ -248,8 +255,8 @@ function wrapSettle(
   const orig = s.result.bind(s);
   (s as unknown as { result: () => Promise<unknown> }).result = async () => {
     try {
-      const r = await orig();
-      onOk();
+      const r = (await orig()) as { usage?: { totalTokens?: number }; stopReason?: string; errorMessage?: string | null };
+      onOk(r);
       return r;
     } catch (e) {
       onErr(e);

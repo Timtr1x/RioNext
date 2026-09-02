@@ -68,8 +68,12 @@ export function createQueuedStreamFn(turns: ScriptedTurn[]): StreamFn {
   return createScriptedStreamFn(() => turns[i++] ?? { type: "text", text: "script exhausted" });
 }
 
-export function createTextStream(model: Model<string>, text: string): AssistantMessageEventStream {
-  const msg = baseAssistant(model, [{ type: "text", text }], "stop");
+export function createTextStream(
+  model: Model<string>,
+  text: string,
+  usage?: Partial<Usage>,
+): AssistantMessageEventStream {
+  const msg = baseAssistant(model, [{ type: "text", text }], "stop", undefined, usage);
   return emit(msg, "stop");
 }
 
@@ -115,6 +119,7 @@ function baseAssistant(
   content: AssistantMessage["content"],
   stopReason: AssistantMessage["stopReason"],
   errorMessage?: string,
+  usage?: Partial<Usage>,
 ): AssistantMessage {
   return {
     role: "assistant",
@@ -122,7 +127,13 @@ function baseAssistant(
     api: model.api,
     provider: model.provider,
     model: model.id,
-    usage: { ...EMPTY_USAGE, input: 8, output: 4, totalTokens: 12 },
+    usage: {
+      ...EMPTY_USAGE,
+      input: usage?.input ?? 8,
+      output: usage?.output ?? 4,
+      totalTokens: usage?.totalTokens ?? 12,
+      cost: usage?.cost ?? EMPTY_USAGE.cost,
+    },
     stopReason,
     errorMessage,
     timestamp: Date.now(),

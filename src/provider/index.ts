@@ -4,6 +4,7 @@ export * from "./catalog.ts";
 export * from "./paths.ts";
 export * from "./probe.ts";
 export * from "./router.ts";
+export * from "./stream.ts";
 export * from "./transform.ts";
 export * from "./types.ts";
 export * from "./visual-runtime.ts";

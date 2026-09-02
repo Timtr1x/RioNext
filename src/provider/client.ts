@@ -17,10 +17,14 @@ export async function postJson(opts: {
   body: unknown;
   fetchFn?: FetchFn;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<HttpResult> {
   const fetchFn = opts.fetchFn ?? fetch;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 30_000);
+  const onAbort = (): void => ctrl.abort();
+  if (opts.signal?.aborted) ctrl.abort();
+  opts.signal?.addEventListener("abort", onAbort);
   try {
     const res = await fetchFn(opts.url, {
       method: "POST",
@@ -38,5 +42,6 @@ export async function postJson(opts: {
     return { status: res.status, ok: res.ok, json, text };
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener("abort", onAbort);
   }
 }

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { commitCompletion, enterClosing, regenerateReportFromSnapshot } from "../../src/controller/close.ts";
-import { Engine } from "../../src/controller/engine.ts";
+import { Engine, restoreEngineData } from "../../src/controller/engine.ts";
+import { DomainError } from "../../src/domain/errors.ts";
 import { evaluateCompletion } from "../../src/domain/completion.ts";
 import type { RunLease } from "../../src/domain/types.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
@@ -688,4 +689,206 @@ test("T34 duplicate physical settle of one logical request spends once", () => {
   e.budget.settle(campId, "logical-1", 1, 0, 0, 1, 0, 0);
   assert.equal(Number(e.budget.snapshot(campId).spent_calls), 1);
   e.close();
+});
+
+test("T37 artifact on disk, DB commit fails, orphan recoverable, no confirmed Fact", async () => {
+  const dir = tmp();
+  const e = boot(dir, "t37");
+  const campId = "t37";
+  const stored = await e.storage.artifacts.put(campId, "t37-original-bytes");
+  assert.equal(existsSync(stored.path), true);
+  assert.throws(() => {
+    e.storage.store.transaction(() => {
+      e.storage.commitArtifact(stored);
+      throw new Error("db_commit_failed");
+    });
+  });
+  assert.equal(existsSync(stored.path), true);
+  const row = e.storage.store.db.prepare("SELECT id FROM artifacts WHERE id = ?").get(stored.id);
+  assert.equal(row, undefined);
+  const orphans = e.storage.scanOrphanArtifacts(campId);
+  assert.ok(orphans.some((o) => o.hash === stored.hash && !o.registered && !o.incomplete));
+  const rec = e.storage.reclaimOrphans(campId);
+  assert.ok(rec.reclaimed >= 1);
+  const arts = e.storage.listArtifacts(campId);
+  assert.equal(arts.find((a) => a.id === stored.id)?.integrity_state, "orphan");
+  assert.equal(e.storage.list("facts", campId).length, 0);
+  const halfDir = join(e.storage.artifacts.campaignDir(campId), "aa");
+  mkdirSync(halfDir, { recursive: true });
+  writeFileSync(join(halfDir, ".tmp-half"), "half-written");
+  const run = e.storage.claimDecide(campId, "t")!;
+  const rejected = e.storage.submitFact({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "f-orphan",
+    run_id: run.run_id,
+    proposition: "from incomplete original",
+    support_refs: [stored.id],
+    conditions: {},
+  });
+  assert.equal(rejected.extra?.submit_status, "rejected");
+  writeFileSync(stored.path, "truncated");
+  const rejectedTrunc = e.storage.submitFact({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "f-trunc",
+    run_id: run.run_id,
+    proposition: "from truncated original",
+    support_refs: [stored.id],
+    conditions: {},
+  });
+  assert.equal(rejectedTrunc.extra?.submit_status, "rejected");
+  assert.equal(e.storage.list("facts", campId).length, 0);
+  e.close();
+});
+
+test("T43 irrelevant events during Decide do not starve a valid read-set commit", () => {
+  const dir = tmp();
+  const e = boot(dir, "t43");
+  const campId = "t43";
+  const run = e.storage.claimDecide(campId, "t")!;
+  const root = e.storage.list("goals", campId)[0]!;
+  const first = e.storage.proposeStepDirect({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "t43-a",
+    run_id: run.run_id,
+    question: "first step",
+    kind: "explore",
+    goal_refs: [String(root.id)],
+    preconditions: { op: "all", of: [] },
+    method_family: "a",
+    expected_observations: [],
+    completion_criteria: "x",
+    fingerprint: "t43-a",
+    reopen_rule: { kind: "never" },
+  });
+  const readSet = e.storage.snapshotReadSet(campId, [
+    { table: "goals", id: String(root.id) },
+    { table: "steps", id: String(first.canonical_ids.step_id) },
+  ]);
+  const headBefore = e.storage.getCampaign(campId).event_head;
+  for (let i = 0; i < 40; i++) {
+    e.storage.recordObservation({
+      campaign_id: campId,
+      producer_id: "p",
+      submission_id: `noise-${i}`,
+      run_id: run.run_id,
+      attempt_id: run.run_id,
+      subject: `log-noise-${i}`,
+      body: { i },
+      artifact_refs: [],
+      conditions: {},
+      env_rev: "env-1",
+    });
+  }
+  assert.ok(e.storage.getCampaign(campId).event_head > headBefore);
+  const ok = e.storage.applyProposalBatch({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "plan-ok",
+    run_id: run.run_id,
+    read_set: readSet,
+    operations: [
+      {
+        op: "propose_step",
+        step: {
+          question: "follow up after noise",
+          kind: "explore",
+          methodFamily: "follow",
+          goalRefs: [String(root.id)],
+        },
+      },
+    ],
+  });
+  assert.equal(ok.status, "ok");
+  assert.ok(ok.canonical_ids.step_id);
+  const current = e.storage.list("steps", campId).find((s) => s.id === first.canonical_ids.step_id)!;
+  e.storage.applyProposalBatch({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "bump-rev",
+    run_id: run.run_id,
+    operations: [
+      {
+        op: "revise_step_priority",
+        step_id: String(first.canonical_ids.step_id),
+        expected_revision: Number(current.revision),
+        priority: 1,
+      },
+    ],
+  });
+  assert.throws(
+    () =>
+      e.storage.applyProposalBatch({
+        campaign_id: campId,
+        producer_id: "p",
+        submission_id: "plan-stale",
+        run_id: run.run_id,
+        read_set: readSet,
+        operations: [
+          {
+            op: "propose_step",
+            step: { question: "stale", kind: "explore", methodFamily: "x", goalRefs: [String(root.id)] },
+          },
+        ],
+      }),
+    (err: unknown) => err instanceof DomainError && err.code === "read_set_conflict",
+  );
+  e.close();
+});
+
+test("T51 backup with WAL and new artifacts restores a consistent snapshot", async () => {
+  const dir = tmp();
+  const e = boot(dir, "t51");
+  const campId = "t51";
+  const run = e.storage.claimDecide(campId, "t")!;
+  const art = await e.storage.putArtifact(campId, "evidence-body-t51", "text/plain", run.run_id);
+  const obs = e.storage.recordObservation({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "o-t51",
+    run_id: run.run_id,
+    attempt_id: run.run_id,
+    subject: "evidence",
+    body: { n: 1 },
+    artifact_refs: [art.id],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  const fact = e.storage.submitFact({
+    campaign_id: campId,
+    producer_id: "p",
+    submission_id: "f-t51",
+    run_id: run.run_id,
+    proposition: "cabinet locked",
+    fact_key: "locked",
+    support_refs: [obs.canonical_ids.observation_id!],
+    conditions: {},
+  });
+  assert.ok(fact.canonical_ids.fact_id);
+  const backupDir = join(dir, "bak");
+  const report = await e.backupTo(backupDir);
+  assert.equal(report.used_sqlite_backup, true);
+  const later = await e.storage.putArtifact(campId, "post-backup-only", "text/plain", run.run_id);
+  e.close();
+  const restoredDir = join(dir, "restored");
+  const restored = restoreEngineData(backupDir, restoredDir);
+  assert.equal(restored.admission_closed, true);
+  assert.equal(restored.integrity_ok, true);
+  assert.equal(restored.broken_refs.length, 0);
+  const e2 = new Engine(makeRuntimeConfig(restoredDir), { silent: true, maxCycles: 1 });
+  assert.equal(e2.storage.list("facts", campId).length, 1);
+  const o = e2.storage.list("observations", campId).find((x) => x.subject === "evidence")!;
+  const refs = JSON.parse(String(o.artifact_refs_json)) as string[];
+  assert.ok(refs.includes(art.id));
+  const arts = e2.storage.listArtifacts(campId);
+  const restoredArt = arts.find((a) => a.id === art.id)!;
+  assert.ok(existsSync(String(restoredArt.path)));
+  assert.equal(e2.storage.artifacts.verify(String(restoredArt.path), String(restoredArt.hash)), true);
+  assert.equal(
+    arts.some((a) => a.id === later.id),
+    false,
+  );
+  e2.close();
 });

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { makeRuntimeConfig } from "../contracts/config.ts";
-import { Engine } from "../controller/engine.ts";
+import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
 import { handleProviderCommand } from "./providers.ts";
@@ -59,6 +59,8 @@ rionext campaign revise-budget --id <id> --max-calls N
 rionext campaign revise-scope --id <id> --scope-version V
 rionext campaign explain-step --id <id> --step <step_id>
 rionext campaign status|events|steps|facts|findings|report --id <id> [--json]
+rionext campaign backup --out <dir>
+rionext campaign restore --from <dir>
 rionext provider add --name N --protocol ANTHROPIC_MESSAGES|OPENAI_CHAT_COMPLETIONS|OPENAI_RESPONSES --base-url URL --api-key KEY
 rionext provider model add --provider ID --name MODEL [--context 256000] [--max-output 16384] [--vision]
 rionext provider test --provider ID --model ID_OR_NAME
@@ -68,6 +70,12 @@ rionext baseline --spec <file>`);
     return;
   }
   const dir = dataDir(flags);
+  if (cmd === "restore") {
+    const from = flags.from;
+    if (typeof from !== "string") throw new Error("--from is required");
+    print(restoreEngineData(resolve(from), dir), true);
+    return;
+  }
   if (cmd === "provider" || cmd === "providers") {
     try {
       const result = await handleProviderCommand(process.argv.slice(3), flags, dir);
@@ -97,7 +105,7 @@ rionext baseline --spec <file>`);
       print(result, true);
       return;
     }
-    if (!id && cmd !== "create") throw new Error("--id is required");
+    if (!id && cmd !== "create" && cmd !== "backup") throw new Error("--id is required");
     switch (cmd) {
       case "start":
         await engine.start(id);
@@ -154,6 +162,12 @@ rionext baseline --spec <file>`);
       case "explain-step":
         print(engine.explainStep(id, String(flags.step ?? "")), Boolean(flags.json) || true);
         break;
+      case "backup": {
+        const out = flags.out;
+        if (typeof out !== "string") throw new Error("--out is required");
+        print(await engine.backupTo(resolve(out)), Boolean(flags.json) || true);
+        break;
+      }
       default:
         throw new Error(`unknown command ${cmd}`);
     }

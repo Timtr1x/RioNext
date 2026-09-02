@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { finished } from "node:stream/promises";
@@ -15,9 +15,21 @@ export interface StoredArtifact {
   truncated: boolean;
 }
 
+export interface DiskArtifact {
+  campaign_id: string;
+  path: string;
+  hash: string | null;
+  size: number;
+  incomplete: boolean;
+}
+
 export class ArtifactStore {
-  constructor(private readonly root: string) {
+  constructor(readonly root: string) {
     mkdirSync(root, { recursive: true });
+  }
+
+  campaignDir(campaignId: string): string {
+    return join(this.root, campaignId);
   }
 
   async put(campaignId: string, bytes: Buffer | string, mime = "text/plain"): Promise<StoredArtifact> {
@@ -51,9 +63,31 @@ export class ArtifactStore {
   }
 
   verify(path: string, expectedHash: string): boolean {
-    const buf = require("node:fs").readFileSync(path) as Buffer;
+    if (!existsSync(path)) return false;
+    const buf = readFileSync(path);
     const hash = createHash("sha256").update(buf).digest("hex");
     return hash === expectedHash;
+  }
+
+  listOnDisk(campaignId: string): DiskArtifact[] {
+    const root = this.campaignDir(campaignId);
+    if (!existsSync(root)) return [];
+    const out: DiskArtifact[] = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        const st = statSync(p);
+        if (st.isDirectory()) {
+          walk(p);
+          continue;
+        }
+        const incomplete = name.startsWith(".tmp-");
+        const hash = !incomplete && /^[0-9a-f]{64}$/.test(name) ? name : null;
+        out.push({ campaign_id: campaignId, path: p, hash, size: st.size, incomplete });
+      }
+    };
+    walk(root);
+    return out;
   }
 }
 
