@@ -1,0 +1,54 @@
+{
+  "campaign_id": "camp_demo_assessment",
+  "schema_version": 1,
+  "mode": "assessment",
+  "root_goal": {
+    "statement": "Assess the lab cabinet according to mandatory coverage.",
+    "success_predicate_ref": "coverage_complete"
+  },
+  "scope": {
+    "assets": ["lab-cabinet"],
+    "workspace": "synthetic",
+    "identities": ["operator"],
+    "entries": ["desk"],
+    "exclusions": [],
+    "profile": "synthetic-lab"
+  },
+  "policy_version": "p0-1",
+  "scope_version": "s0-1",
+  "goal_version": "g0-1",
+  "tool_allowlist": ["world_inspect", "world_act", "graph_query", "submit_observation", "submit_fact", "submit_finding", "propose_plan", "finish_step", "finish_decision", "checkpoint"],
+  "execution_profile": "synthetic",
+  "model_policy": {
+    "provider": "scripted",
+    "model": "scripted",
+    "thinking_level": "off",
+    "allow_retry": false,
+    "allow_model_fallback": false
+  },
+  "budget": {
+    "currency": "USD",
+    "price_version": "unknown",
+    "max_cost_micro": null,
+    "max_tokens": 100000,
+    "max_calls": 40,
+    "deadline_ms": null
+  },
+  "verification_policy": {
+    "require_independent_verify": true,
+    "oracle_id": "synthetic-oracle"
+  },
+  "coverage_policy": {
+    "dimensions": ["asset"],
+    "mandatory_ids": ["inspect-desk", "unlock-drawer", "open-cabinet", "side-panel"]
+  },
+  "artifact_policy": {
+    "max_bytes": 1000000,
+    "retention_days": 30
+  },
+  "stop_policy": {
+    "max_empty_reviews_per_progress_epoch": 2,
+    "decide_debounce_ms": 0
+  },
+  "environment_revision": "env-1"
+}

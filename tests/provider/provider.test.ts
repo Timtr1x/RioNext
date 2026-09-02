@@ -1,0 +1,228 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { analyzeVisual, NonVisualModelError } from "../../src/provider/analyze-visual.ts";
+import { inferVision, resolveVision } from "../../src/provider/capabilities.ts";
+import { ProviderCatalog } from "../../src/provider/catalog.ts";
+import { completeBaseUrl } from "../../src/provider/paths.ts";
+import { testConnection } from "../../src/provider/probe.ts";
+import { resolveSlot, resolveVisionRoute } from "../../src/provider/router.ts";
+import { buildProtocolBody, extractToolCall } from "../../src/provider/transform.ts";
+import { generateVisionProbePng, VISION_PHRASE, visionPassed } from "../../src/provider/visual-runtime.ts";
+import { makeRuntimeConfig } from "../../src/contracts/config.ts";
+import { Engine } from "../../src/controller/engine.ts";
+import { loadDemoSpec } from "../../src/eval/helpers.ts";
+
+function dir(): string {
+  return mkdtempSync(join(tmpdir(), "rn-prv-"));
+}
+
+test("baseUrl auto-completes protocol paths and does not double-append", () => {
+  assert.equal(completeBaseUrl("https://api.openai.com", "OPENAI_CHAT_COMPLETIONS"), "https://api.openai.com/v1/chat/completions");
+  assert.equal(completeBaseUrl("https://api.openai.com/v1", "OPENAI_CHAT_COMPLETIONS"), "https://api.openai.com/v1/chat/completions");
+  assert.equal(
+    completeBaseUrl("https://api.openai.com/v1/chat/completions", "OPENAI_CHAT_COMPLETIONS"),
+    "https://api.openai.com/v1/chat/completions",
+  );
+  assert.equal(completeBaseUrl("https://api.anthropic.com", "ANTHROPIC_MESSAGES"), "https://api.anthropic.com/v1/messages");
+  assert.equal(completeBaseUrl("https://api.openai.com/v1", "OPENAI_RESPONSES"), "https://api.openai.com/v1/responses");
+});
+
+test("vision inferred from name and override wins", () => {
+  assert.equal(inferVision("gpt-4o"), true);
+  assert.equal(inferVision("claude-sonnet-4-6"), true);
+  assert.equal(inferVision("qwen2.5-vl-72b"), true);
+  assert.equal(inferVision("deepseek-v3"), false);
+  assert.equal(resolveVision("deepseek-v3", true).vision, true);
+  assert.equal(resolveVision("gpt-4o", false).vision, false);
+});
+
+test("visual-runtime PNG is a real PNG and phrase matcher works", () => {
+  const png = generateVisionProbePng();
+  assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+  assert.ok(png.length > 100);
+  assert.equal(visionPassed(`The code is ${VISION_PHRASE}.`), true);
+  assert.equal(visionPassed("hello"), false);
+});
+
+test("Anthropic body uses system top-level, input_schema, tool_choice object, not OpenAI function tools", () => {
+  const body = buildProtocolBody("ANTHROPIC_MESSAGES", {
+    model: "claude-sonnet-4-6",
+    system: "sys",
+    user: "hi",
+    max_tokens: 32,
+    tools: [{ name: "echo_probe", description: "d", parameters: { type: "object", properties: {} } }],
+    thinking: "adaptive",
+  });
+  assert.equal(body.system, "sys");
+  assert.ok(!JSON.stringify(body.messages).includes('"role":"system"'));
+  const tools = body.tools as { input_schema: unknown; name: string }[];
+  assert.equal(tools[0]!.name, "echo_probe");
+  assert.ok(tools[0]!.input_schema);
+  assert.deepEqual(body.tool_choice, { type: "auto" });
+  assert.deepEqual(body.thinking, { type: "adaptive" });
+  assert.equal(JSON.stringify(body).includes('"type":"function"'), false);
+});
+
+test("OpenAI chat uses function tools and reasoning_effort when thinking on", () => {
+  const body = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
+    model: "gpt-4o",
+    user: "hi",
+    max_tokens: 16,
+    tools: [{ name: "echo_probe", description: "d", parameters: { type: "object" } }],
+    thinking: "on",
+  });
+  assert.equal((body.tools as { type: string }[])[0]!.type, "function");
+  assert.equal(body.reasoning_effort, "medium");
+});
+
+test("slot empty or unavailable falls back to solver then first available", () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "lab",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://example.test",
+    api_key: "sk-test",
+  });
+  const main = cat.addModel({ provider_id: p.id, name: "gpt-4o" });
+  const side = cat.addModel({ provider_id: p.id, name: "deepseek-v3" });
+  cat.assignSlot("solver", main.id);
+  const r1 = resolveSlot(cat, "reflect");
+  assert.equal(r1.model.id, main.id);
+  assert.equal(r1.fallback_from, "slot_empty");
+  cat.assignSlot("visual", side.id);
+  cat.setModelAvailable(side.id, false);
+  const r2 = resolveSlot(cat, "visual");
+  assert.equal(r2.model.id, main.id);
+  assert.equal(r2.fallback_from, "slot_unavailable");
+});
+
+test("analyze_visual rejects non-visual models", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "lab",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://example.test/v1/chat/completions",
+    api_key: "sk-test",
+  });
+  const textOnly = cat.addModel({ provider_id: p.id, name: "deepseek-v3", vision: false });
+  cat.assignSlot("solver", textOnly.id);
+  cat.assignSlot("visual", textOnly.id);
+  await assert.rejects(
+    () => analyzeVisual({ catalog: cat, prompt: "read", image_png_base64: "aaaa", fetchFn: async () => new Response("{}") }),
+    (e: unknown) => e instanceof NonVisualModelError,
+  );
+});
+
+test("connection test records auth text tools vision via mock fetch", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "mock",
+    protocol: "ANTHROPIC_MESSAGES",
+    base_url: "https://api.anthropic.com",
+    api_key: "sk-ant",
+  });
+  const m = cat.addModel({ provider_id: p.id, name: "claude-sonnet-4-6" });
+  let sawFunctionTools = false;
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    if (JSON.stringify(body.tools ?? "").includes('"type":"function"')) sawFunctionTools = true;
+    if (body.tools) {
+      return new Response(JSON.stringify({ content: [{ type: "tool_use", name: "echo_probe", input: { token: "ok" } }] }), { status: 200 });
+    }
+    if (JSON.stringify(body).includes("image")) {
+      return new Response(JSON.stringify({ content: [{ type: "text", text: VISION_PHRASE }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ content: [{ type: "text", text: "pong" }] }), { status: 200 });
+  };
+  const report = await testConnection({ provider: p, model: m, apiKey: "sk-ant", fetchFn });
+  assert.equal(report.auth.ok, true);
+  assert.equal(report.text.ok, true);
+  assert.equal(report.tools.ok, true);
+  assert.equal(report.vision.ok, true);
+  assert.equal(sawFunctionTools, false);
+  assert.ok(report.variants.some((v) => v.name.includes("adaptive") || v.name.includes("enabled") || v.name === "auth"));
+  const anthropicThinking = report.variants.filter((v) => v.name.includes("adaptive") || v.name.includes("enabled") || v.name.endsWith("off"));
+  assert.ok(anthropicThinking.length >= 3);
+});
+
+test("OpenAI text probes are four thinking on/off groups", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "oa",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://api.openai.com",
+    api_key: "sk",
+  });
+  const m = cat.addModel({ provider_id: p.id, name: "gpt-4o-mini", vision: false });
+  const names: string[] = [];
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    names.push(`${body.reasoning_effort ? "on" : "off"}:${body.tools ? "tools" : "text"}`);
+    if (body.tools) {
+      return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { name: "echo_probe" } }] } }] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "pong" } }] }), { status: 200 });
+  };
+  const report = await testConnection({ provider: p, model: m, apiKey: "sk", fetchFn });
+  assert.equal(report.text.ok, true);
+  assert.equal(report.vision.ok, false);
+  assert.ok(names.includes("on:text"));
+  assert.ok(names.includes("off:text"));
+  assert.ok(names.includes("on:tools"));
+  assert.ok(names.includes("off:tools"));
+});
+
+test("P1 pause resume hint revise-budget explain-step", () => {
+  const e = new Engine(makeRuntimeConfig(dir()), { silent: true, maxCycles: 1 });
+  const spec = loadDemoSpec("p1-ctrl");
+  e.createCampaign(spec);
+  e.storage.setCampaignState(spec.campaign_id, "active", { kind: "user", id: "t" });
+  e.pause(spec.campaign_id);
+  assert.equal(e.storage.getCampaign(spec.campaign_id).state, "paused");
+  e.resume(spec.campaign_id);
+  assert.equal(e.storage.getCampaign(spec.campaign_id).state, "active");
+  const epoch = e.hint(spec.campaign_id, "try the drawer");
+  assert.ok(epoch >= 1);
+  const b = e.reviseBudget(spec.campaign_id, { max_calls: 12 });
+  assert.ok(b >= 1);
+  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const step = e.storage.proposeStepDirect({
+    campaign_id: spec.campaign_id,
+    producer_id: "p",
+    submission_id: "s",
+    run_id: run.run_id,
+    question: "inspect",
+    kind: "explore",
+    goal_refs: [String(e.storage.list("goals", spec.campaign_id)[0]!.id)],
+    preconditions: { op: "all", of: [] },
+    method_family: "x",
+    expected_observations: [],
+    completion_criteria: "x",
+    fingerprint: "ex",
+    reopen_rule: { kind: "never" },
+  });
+  const explained = e.explainStep(spec.campaign_id, step.canonical_ids.step_id!);
+  assert.equal(explained.status, "ready");
+  e.close();
+});
+
+test("catalog snapshot never includes api key", () => {
+  const cat = new ProviderCatalog(dir());
+  cat.addProvider({
+    display_name: "x",
+    protocol: "OPENAI_RESPONSES",
+    base_url: "https://api.openai.com",
+    api_key: "sk-secret-should-not-leak",
+  });
+  const snap = JSON.stringify(cat.publicSnapshot());
+  assert.equal(snap.includes("sk-secret"), false);
+  assert.equal(snap.includes("api_key_set"), true);
+});
+
+test("extractToolCall sees anthropic tool_use", () => {
+  assert.equal(extractToolCall("ANTHROPIC_MESSAGES", { content: [{ type: "tool_use", name: "echo_probe" }] }), true);
+  assert.equal(extractToolCall("ANTHROPIC_MESSAGES", { content: [{ type: "text", text: "hi" }] }), false);
+});
