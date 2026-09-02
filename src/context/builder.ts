@@ -3,6 +3,7 @@ import type { ContextPack } from "../contracts/worker-runtime.ts";
 import { hashJson } from "../domain/fingerprint.ts";
 import type { ContextManifest, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
+import { isKaliProfile } from "../tools/kali-profile.ts";
 import { PROMPT_VERSION } from "../version.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -82,18 +83,32 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const tool_names =
     lease.mode === "decide"
       ? ["graph_query", "artifact_read", "propose_plan", "checkpoint", "finish_decision"]
-      : [
-          "graph_query",
-          "artifact_read",
-          "submit_observation",
-          "submit_fact",
-          "submit_finding",
-          "propose_step",
-          "checkpoint",
-          "finish_step",
-          "world_inspect",
-          "world_act",
-        ];
+      : isKaliProfile(camp.spec.execution_profile)
+        ? [
+            "graph_query",
+            "artifact_read",
+            "submit_observation",
+            "submit_fact",
+            "submit_finding",
+            "propose_step",
+            "checkpoint",
+            "finish_step",
+            "kali_run",
+            "kali_write",
+            "playwright",
+          ]
+        : [
+            "graph_query",
+            "artifact_read",
+            "submit_observation",
+            "submit_fact",
+            "submit_finding",
+            "propose_step",
+            "checkpoint",
+            "finish_step",
+            "world_inspect",
+            "world_act",
+          ];
   return {
     manifest,
     system_prompt: loadPrompt(lease.mode),

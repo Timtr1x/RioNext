@@ -246,16 +246,40 @@ export class StorageService {
     this.appendEvent(campaignId, "control.changed", { command: "halt_admission", reason }, { kind: "controller", id: "fault" });
   }
 
-  registerOperation(campaignId: string, invocationId: string, executionId: string): void {
+  registerOperation(campaignId: string, invocationId: string, executionId: string, state = "running"): void {
     this.store.db
       .prepare(
-        "INSERT INTO operations(execution_id, campaign_id, invocation_id, state, next_poll_at, created_at) VALUES (?, ?, ?, 'running', NULL, ?)",
+        `INSERT INTO operations(execution_id, campaign_id, invocation_id, state, next_poll_at, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?)
+         ON CONFLICT(execution_id) DO UPDATE SET
+           campaign_id = excluded.campaign_id,
+           invocation_id = excluded.invocation_id,
+           state = excluded.state`,
       )
-      .run(executionId, campaignId, invocationId, nowIso());
+      .run(executionId, campaignId, invocationId, state, nowIso());
   }
 
   getOperation(executionId: string): Record<string, unknown> | undefined {
     return this.store.db.prepare("SELECT * FROM operations WHERE execution_id = ?").get(executionId) as Record<string, unknown> | undefined;
+  }
+
+  listOperations(campaignId: string): Record<string, unknown>[] {
+    return this.store.db
+      .prepare(
+        `SELECT o.execution_id, o.campaign_id, o.invocation_id, o.state, o.next_poll_at, o.created_at,
+                i.purpose, i.effect_class, i.state AS invocation_state, i.external_id
+         FROM operations o
+         LEFT JOIN invocations i ON i.id = o.invocation_id
+         WHERE o.campaign_id = ?
+         ORDER BY o.created_at ASC`,
+      )
+      .all(campaignId) as Record<string, unknown>[];
+  }
+
+  updateOperationState(executionId: string, state: string, nextPollAt: string | null = null): void {
+    this.store.db
+      .prepare("UPDATE operations SET state = ?, next_poll_at = ? WHERE execution_id = ?")
+      .run(state, nextPollAt, executionId);
   }
 
   acquireResourceLock(campaignId: string, lockKey: string, invocationId: string, effectKnown: boolean): boolean {
@@ -267,6 +291,34 @@ export class StorageService {
     } catch {
       return false;
     }
+  }
+
+  listResourceLocks(campaignId?: string): { lock_key: string; campaign_id: string; invocation_id: string | null; effect_known: number }[] {
+    if (campaignId) {
+      return this.store.db
+        .prepare("SELECT lock_key, campaign_id, invocation_id, effect_known FROM resource_locks WHERE campaign_id = ?")
+        .all(campaignId) as { lock_key: string; campaign_id: string; invocation_id: string | null; effect_known: number }[];
+    }
+    return this.store.db
+      .prepare("SELECT lock_key, campaign_id, invocation_id, effect_known FROM resource_locks")
+      .all() as { lock_key: string; campaign_id: string; invocation_id: string | null; effect_known: number }[];
+  }
+
+  releaseResourceLocksForInvocation(campaignId: string, invocationId: string): void {
+    this.store.db
+      .prepare("DELETE FROM resource_locks WHERE campaign_id = ? AND invocation_id = ?")
+      .run(campaignId, invocationId);
+  }
+
+  /** Known-effect locks only. Lease expiry / run finish must not call the unknown variant. */
+  releaseKnownResourceLocks(campaignId: string, invocationId: string): void {
+    this.store.db
+      .prepare("DELETE FROM resource_locks WHERE campaign_id = ? AND invocation_id = ? AND effect_known = 1")
+      .run(campaignId, invocationId);
+  }
+
+  releaseCampaignResourceLocks(campaignId: string): void {
+    this.store.db.prepare("DELETE FROM resource_locks WHERE campaign_id = ?").run(campaignId);
   }
 
   explainStep(campaignId: string, stepId: string): Record<string, unknown> {

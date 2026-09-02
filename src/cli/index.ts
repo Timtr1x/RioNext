@@ -5,6 +5,7 @@ import { makeRuntimeConfig } from "../contracts/config.ts";
 import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
+import { handleKaliCommand } from "./kali.ts";
 import { handleProviderCommand } from "./providers.ts";
 
 function parseArgs(argv: string[]): { cmd: string; flags: Record<string, string | boolean> } {
@@ -58,7 +59,8 @@ rionext campaign hint --id <id> --text <hint>
 rionext campaign revise-budget --id <id> --max-calls N
 rionext campaign revise-scope --id <id> --scope-version V
 rionext campaign explain-step --id <id> --step <step_id>
-rionext campaign status|events|steps|facts|findings|report --id <id> [--json]
+rionext campaign status|events|steps|facts|findings|report|operations --id <id> [--json]
+rionext campaign reconcile --id <id> [--invocation <inv>] [--json]
 rionext campaign backup --out <dir>
 rionext campaign restore --from <dir>
 rionext provider add --name N --protocol ANTHROPIC_MESSAGES|OPENAI_CHAT_COMPLETIONS|OPENAI_RESPONSES --base-url URL --api-key KEY
@@ -66,10 +68,21 @@ rionext provider model add --provider ID --name MODEL [--context 256000] [--max-
 rionext provider test --provider ID --model ID_OR_NAME
 rionext provider slots --solver ID --visual ID --reflect none
 rionext provider ui [--port 7780]
+rionext kali status|pull|build|protect|smoke
 rionext baseline --spec <file>`);
     return;
   }
   const dir = dataDir(flags);
+  if (cmd === "kali") {
+    try {
+      const rest = process.argv.slice(2).filter((a) => a !== "kali" && a !== "campaign");
+      print(handleKaliCommand(rest), true);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (cmd === "restore") {
     const from = flags.from;
     if (typeof from !== "string") throw new Error("--from is required");
@@ -161,6 +174,12 @@ rionext baseline --spec <file>`);
         break;
       case "explain-step":
         print(engine.explainStep(id, String(flags.step ?? "")), Boolean(flags.json) || true);
+        break;
+      case "operations":
+        print({ operations: engine.listOperations(id) }, Boolean(flags.json) || true);
+        break;
+      case "reconcile":
+        print({ reconcile: engine.reconcile(id), invocation: flags.invocation ?? null }, Boolean(flags.json) || true);
         break;
       case "backup": {
         const out = flags.out;

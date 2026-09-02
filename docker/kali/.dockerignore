@@ -1,0 +1,6 @@
+*
+!entrypoint.sh
+!install-extra.sh
+!pw/package.json
+!pw/pw-daemon.mjs
+!pw/pw-ctl.mjs

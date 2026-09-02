@@ -5,6 +5,8 @@ import { newId } from "../../domain/ids.ts";
 import type { RunLease, TaskOutcome, WorkerMode } from "../../domain/types.ts";
 import { ingestToolOutputAsData, type ModelGateway, type ToolGateway } from "../../gateway/gateways.ts";
 import type { StorageService } from "../../storage/service.ts";
+import { isKaliProfile } from "../../tools/kali-profile.ts";
+import type { KaliRuntime } from "../../tools/kali-runtime.ts";
 import { actWorld, inspectWorld, type LabWorld } from "../../tools/synthetic.ts";
 import type { StreamFn as PiStreamFn } from "@earendil-works/pi-agent-core";
 import { SCRIPTED_MODEL, type TurnChooser, createScriptedStreamFn } from "./scripted-stream.ts";
@@ -16,6 +18,7 @@ export interface FactoryDeps {
   chooseDecide: TurnChooser;
   chooseExecute: TurnChooser;
   getMaxTurns: () => { decide: number; execute: number };
+  kali?: KaliRuntime;
 }
 
 export class PiWorkerFactory implements WorkerFactory {
@@ -349,6 +352,35 @@ export class PiWorker implements WorkerRuntime {
           s.saveWorld(lease.campaign_id, result.world);
           return ok(result);
         }),
+        tool("kali_run", "Run an allowlisted Kali binary in the campaign container. bash/sh/python3 can run /workspace scripts or bash -c. Writes belong under /workspace.", Type.Object({
+          kind: Type.Literal("kali"),
+          bin: Type.String(),
+          args: Type.Array(Type.String()),
+          url: Type.Optional(Type.String()),
+          redirects: Type.Optional(Type.Array(Type.String())),
+        }), async (_id, _params) => {
+          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_kali_result"));
+        }),
+        tool("kali_write", "Write a script or payload file into the campaign container workspace (/workspace)", Type.Object({
+          kind: Type.Literal("kali_write"),
+          path: Type.String({ description: "Relative path under /workspace, e.g. payloads/xss.html" }),
+          content: Type.String(),
+        }), async (_id, _params) => {
+          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_kali_write_result"));
+        }),
+        tool("playwright", "Operate the persistent Playwright Chromium in the Kali container (goto/snapshot/click/type/press/screenshot/content/wait/back/status). Use snapshot refs for click/type.", Type.Object({
+          kind: Type.Literal("playwright"),
+          op: Type.String({ description: "goto|snapshot|click|type|press|screenshot|content|wait|back|status" }),
+          url: Type.Optional(Type.String()),
+          ref: Type.Optional(Type.String()),
+          selector: Type.Optional(Type.String()),
+          text: Type.Optional(Type.String()),
+          key: Type.Optional(Type.String()),
+          timeout_ms: Type.Optional(Type.Number()),
+          redirects: Type.Optional(Type.Array(Type.String())),
+        }), async (_id, _params) => {
+          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
+        }),
         tool("finish_step", "Finish execute fragment", Type.Object({
           reason: Type.String(),
           summary: Type.String(),
@@ -363,6 +395,15 @@ export class PiWorker implements WorkerRuntime {
           return { ...ok({ finish: true }), terminate: true };
         }),
       );
+    }
+    const camp = s.getCampaign(lease.campaign_id);
+    if (this.mode === "execute") {
+      const drop = isKaliProfile(camp.spec.execution_profile)
+        ? new Set(["world_inspect", "world_act"])
+        : new Set(["kali_run", "kali_write", "playwright", "browser_fetch"]);
+      for (let i = tools.length - 1; i >= 0; i--) {
+        if (drop.has(tools[i]!.name)) tools.splice(i, 1);
+      }
     }
     const allowed = new Set(context.tool_names);
     return tools.filter((t) => allowed.has(t.name));
@@ -382,8 +423,40 @@ function ok(details: unknown): { content: { type: "text"; text: string }[]; deta
   return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 }
 
+function decodeExec(
+  result: { stdout: string; stderr: string; code: number; timedOut: boolean; truncated: boolean; container: string } | undefined,
+  empty: string,
+): unknown {
+  if (!result) return { error: empty };
+  const stdout = result.stdout ?? "";
+  let parsed: unknown = stdout.slice(0, 8000);
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    // raw text from nmap/curl
+  }
+  return {
+    code: result.code,
+    truncated: result.truncated,
+    container: result.container,
+    timedOut: result.timedOut,
+    stderr: (result.stderr ?? "").slice(0, 2000),
+    result: parsed,
+  };
+}
+
 function isEnvTool(name: string): boolean {
-  return name === "world_inspect" || name === "world_act" || name === "bash" || name === "write" || name === "edit";
+  return (
+    name === "world_inspect" ||
+    name === "world_act" ||
+    name === "bash" ||
+    name === "write" ||
+    name === "edit" ||
+    name === "kali_run" ||
+    name === "kali_write" ||
+    name === "playwright" ||
+    name === "browser_fetch"
+  );
 }
 
 function baseOutcome(

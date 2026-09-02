@@ -392,4 +392,5 @@ CREATE TABLE IF NOT EXISTS resource_locks (
   PRIMARY KEY (campaign_id, lock_key),
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_locks_key ON resource_locks(lock_key);
 `;

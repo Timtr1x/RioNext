@@ -14,7 +14,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && node --test \"./dist/tests/**/*.test.js\"",
     "cli": "tsc -p tsconfig.json && node dist/src/cli/index.js",
-    "start": "node dist/src/cli/index.js"
+    "start": "node dist/src/cli/index.js",
+    "kali:pull": "docker pull kalilinux/kali-rolling",
+    "kali:build": "docker build -t rionext-kali:rolling -t rionext-kali:master docker/kali"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.4",

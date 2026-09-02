@@ -233,7 +233,6 @@ test("T50 long async uses same execution_id across reopen", () => {
     effect: "external_write",
     envTool: true,
   });
-  e.storage.registerOperation(campId, sent.invocation_id, sent.execution_id!);
   e.close();
   const e2 = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1, effectAdapter: adapter });
   const op = e2.storage.getOperation(sent.execution_id!);

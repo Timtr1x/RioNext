@@ -15,7 +15,11 @@ import { ModelGateway, ToolGateway } from "../gateway/gateways.ts";
 import { InvocationBook } from "../gateway/invocation.ts";
 import { PiWorkerFactory, type PiWorker } from "../runtime/pi/factory.ts";
 import type { TurnChooser } from "../runtime/pi/scripted-stream.ts";
+import type { DockerCli } from "../tools/docker-cli.ts";
 import { FileEffectAdapter, type EffectAdapter } from "../tools/effect-adapter.ts";
+import type { ResolveFn } from "../tools/egress.ts";
+import { KaliEffectAdapter, RoutingEffectAdapter } from "../tools/kali-adapter.ts";
+import { KaliRuntime, containerName, type KaliStartOpts } from "../tools/kali-runtime.ts";
 import { ArtifactStore } from "../storage/artifacts.ts";
 import { backupStore, restoreStore, type BackupReport, type RestoreReport } from "../storage/backup.ts";
 import { Store } from "../storage/db.ts";
@@ -29,6 +33,8 @@ export interface EngineOptions {
   maxCycles?: number;
   silent?: boolean;
   effectAdapter?: EffectAdapter;
+  dockerCli?: DockerCli;
+  kaliResolve?: ResolveFn;
 }
 
 export class Engine {
@@ -38,6 +44,7 @@ export class Engine {
   readonly factory: PiWorkerFactory;
   readonly config: RuntimeConfig;
   readonly dispatchGate: DispatchGate;
+  readonly kali: KaliRuntime;
   readonly logs: string[] = [];
   lastWorker: PiWorker | null = null;
   modelSends = 0;
@@ -55,7 +62,10 @@ export class Engine {
     this.storage = new StorageService(store, artifacts);
     this.budget = new BudgetLedger(this.storage);
     this.invocations = new InvocationBook(this.storage);
-    const adapter = options.effectAdapter ?? new FileEffectAdapter(join(configIn.artifact_root, "effects"));
+    const fileAdapter = options.effectAdapter ?? new FileEffectAdapter(join(configIn.artifact_root, "effects"));
+    this.kali = new KaliRuntime(options.dockerCli);
+    const kaliAdapter = new KaliEffectAdapter(this.kali, (invocationId) => this.kaliOptsForInvocation(invocationId));
+    const adapter = new RoutingEffectAdapter(fileAdapter, kaliAdapter);
     this.dispatchGate = new DispatchGate(this.storage, this.budget, this.invocations, adapter);
     this.factory = new PiWorkerFactory({
       storage: this.storage,
@@ -67,6 +77,7 @@ export class Engine {
         decide: this.config.max_decide_turns,
         execute: this.config.max_execute_turns_per_run,
       }),
+      kali: this.kali,
     });
   }
 
@@ -104,8 +115,31 @@ export class Engine {
 
   cancel(campaignId: string): number {
     const epoch = this.storage.persistCancel(campaignId, { kind: "user", id: "cli" });
-    this.log(`cancelled campaign ${campaignId} cancel_epoch=${epoch}`);
+    this.kali.kill(campaignId);
+    this.storage.releaseCampaignResourceLocks(campaignId);
+    this.log(`cancelled campaign ${campaignId} cancel_epoch=${epoch}; campaign container stopped; packets already sent are not retracted`);
     return epoch;
+  }
+
+  kaliOpts(campaignId: string): KaliStartOpts {
+    const camp = this.storage.getCampaign(campaignId);
+    const allow = camp.spec.scope.assets;
+    return {
+      campaignId,
+      workspaceHost: join(this.config.data_dir, "workspace", campaignId),
+      dbPath: this.config.db_path,
+      secretsPath: join(this.config.data_dir, "provider-secrets.json"),
+      artifactRoot: this.config.artifact_root,
+      dataDir: this.config.data_dir,
+      allowAssets: allow,
+      network: allow.length ? "allowlist" : "none",
+      resolve: this.options.kaliResolve,
+    };
+  }
+
+  private kaliOptsForInvocation(invocationId: string): KaliStartOpts {
+    const inv = this.invocations.get(invocationId);
+    return this.kaliOpts(String(inv.campaign_id));
   }
 
   pause(campaignId: string): void {
@@ -130,6 +164,17 @@ export class Engine {
 
   explainStep(campaignId: string, stepId: string): Record<string, unknown> {
     return this.storage.explainStep(campaignId, stepId);
+  }
+
+  listOperations(campaignId: string): Record<string, unknown>[] {
+    return this.storage.listOperations(campaignId).map((row) => ({
+      ...row,
+      container: String(row.execution_id ?? "").startsWith("kali_") ? containerName(campaignId) : null,
+    }));
+  }
+
+  reconcile(campaignId: string): { prepared_released: number; marked_uncertain: number; reconciled: number } {
+    return this.dispatchGate.recover(campaignId);
   }
 
   async runLoop(campaignId: string): Promise<void> {
@@ -373,6 +418,24 @@ export class Engine {
     const activeRun = this.storage.store.db
       .prepare("SELECT id, mode, state FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') LIMIT 1")
       .get(campaignId);
+    const openInv = this.invocations.nonTerminal(campaignId);
+    const uncertain = openInv.map((row) => ({
+      id: String(row.id),
+      purpose: row.purpose ?? null,
+      effect_class: row.effect_class ?? null,
+      execution_id: row.external_id ?? null,
+      state: row.state,
+    }));
+    const ops = this.storage.listOperations(campaignId);
+    const opsOpen = ops.filter((o) => !["completed", "failed"].includes(String(o.state))).length;
+    const residual = uncertain
+      .filter((u) => String(u.execution_id ?? "").startsWith("kali_") || String(u.effect_class) === "unknown")
+      .map((u) => ({
+        execution_id: u.execution_id,
+        invocation_id: u.id,
+        killable: true,
+        note: "cancel stops the campaign container; it does not retract packets already sent",
+      }));
     return {
       campaign_id: campaignId,
       state: camp.state,
@@ -383,6 +446,9 @@ export class Engine {
       progress_epoch: camp.progress_epoch,
       stop_reason: camp.state,
       schema_version: SCHEMA_VERSION,
+      uncertain_invocations: uncertain,
+      operations_open: opsOpen,
+      residual,
     };
   }
 

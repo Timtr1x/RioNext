@@ -1,9 +1,30 @@
 import { DomainError } from "../domain/errors.ts";
 import type { EffectClass, InvocationState, RunLease } from "../domain/types.ts";
 import type { EffectAdapter } from "../tools/effect-adapter.ts";
+import { isKaliPayload } from "../tools/kali-adapter.ts";
+import { isLoopbackHost, parseDestination } from "../tools/egress.ts";
 import type { BudgetLedger } from "./budget-ledger.ts";
 import type { InvocationBook } from "./invocation.ts";
 import type { StorageService } from "../storage/service.ts";
+
+export function envLockKeys(campaignId: string, payload: unknown): string[] {
+  const keys = new Set<string>();
+  if (isKaliPayload(payload)) {
+    keys.add(`workspace:${campaignId}`);
+    const url = (payload as { url?: string }).url;
+    if (typeof url === "string" && url) {
+      try {
+        const dest = parseDestination(url);
+        if (!isLoopbackHost(dest.host)) keys.add(`target:${dest.host}`);
+      } catch {
+        // malformed dest is denied later at egress
+      }
+    }
+  } else {
+    keys.add(`world:${campaignId}`);
+  }
+  return [...keys];
+}
 
 export interface DispatchRequest {
   lease: RunLease;
@@ -61,6 +82,13 @@ export class DispatchGate {
         effect_class: req.effect,
         reserved_calls: 1,
       });
+      if (req.envTool) {
+        for (const key of envLockKeys(req.lease.campaign_id, req.payload)) {
+          if (!this.storage.acquireResourceLock(req.lease.campaign_id, key, inv.id, false)) {
+            throw new DomainError("resource_locked", `resource lock held: ${key}`, "denied");
+          }
+        }
+      }
       this.budget.reserve(req.lease.campaign_id, inv.id, 1, 0, 0);
       this.invocations.mark(inv.id, "dispatching");
       return { ok: true as const, invocation_id: inv.id };
@@ -74,8 +102,10 @@ export class DispatchGate {
       this.storage.store.db
         .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
         .run(sent.execution_id, permit.invocation_id);
+      this.storage.registerOperation(req.lease.campaign_id, permit.invocation_id, sent.execution_id, "completed");
       this.invocations.mark(permit.invocation_id, "completed");
       this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
+      this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
       return { status: "sent", invocation_id: permit.invocation_id, execution_id: sent.execution_id };
     } catch (err) {
       this.invocations.mark(permit.invocation_id, "uncertain", { error: String(err) });
@@ -125,13 +155,18 @@ export class DispatchGate {
         if (ext && this.adapter.query(ext) === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(ext, "completed");
           reconciled += 1;
         } else if (ext && this.adapter.query(ext) === "failed") {
           this.invocations.mark(id, "failed_known");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(ext, "failed");
           reconciled += 1;
         } else {
           this.invocations.mark(id, "uncertain");
+          if (ext) this.storage.updateOperationState(ext, "unknown");
           marked_uncertain += 1;
         }
       } else if (state === "uncertain") {
@@ -140,6 +175,14 @@ export class DispatchGate {
         if (ext && this.adapter.query(ext) === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(ext, "completed");
+          reconciled += 1;
+        } else if (ext && this.adapter.query(ext) === "failed") {
+          this.invocations.mark(id, "failed_known");
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reservedCalls, 0, 0, 0, 0);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          this.storage.updateOperationState(ext, "failed");
           reconciled += 1;
         }
       }

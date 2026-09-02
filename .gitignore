@@ -6,5 +6,7 @@ dist/
 .env
 artifacts/
 .rionext/
+.rionext-test/
+.rionext-smoke/
 coverage/
 *.log
