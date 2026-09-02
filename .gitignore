@@ -10,3 +10,5 @@ artifacts/
 .rionext-smoke/
 coverage/
 *.log
+v0.1/
+v0.2/

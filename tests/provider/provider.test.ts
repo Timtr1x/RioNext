@@ -51,6 +51,14 @@ test("baseUrl auto-completes protocol paths and does not double-append", () => {
     completeBaseUrl("https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions", "OPENAI_CHAT_COMPLETIONS"),
     "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions",
   );
+  assert.equal(
+    completeBaseUrl("https://opencode.ai/zen/go/v1", "OPENAI_CHAT_COMPLETIONS"),
+    "https://opencode.ai/zen/go/v1/chat/completions",
+  );
+  assert.equal(
+    completeBaseUrl("https://opencode.ai/zen/go/v1/chat/completions", "OPENAI_CHAT_COMPLETIONS"),
+    "https://opencode.ai/zen/go/v1/chat/completions",
+  );
 });
 
 test("vision inferred from name and override wins", () => {
