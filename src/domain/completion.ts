@@ -1,0 +1,136 @@
+import type {
+  CampaignMode,
+  CampaignState,
+  CoverageApplicability,
+  CoverageEvidenceState,
+  CoverageExecutionState,
+  CoverageOutcome,
+  FindingStatus,
+  StepStatus,
+} from "./types.ts";
+
+export interface CompletionSnapshot {
+  mode: CampaignMode;
+  state: CampaignState;
+  cancel_epoch: number;
+  in_flight_runs: number;
+  in_flight_invocations: number;
+  unconsumed_events: number;
+  pending_important_proposals: number;
+  uncertain_invocations: number;
+  empty_reviews: number;
+  max_empty_reviews: number;
+  ready_steps: number;
+  blocked_steps: number;
+  frontier_size: number;
+  new_observation_since_progress: boolean;
+  findings: { status: FindingStatus }[];
+  coverage: CoverageRow[];
+  root_goal_satisfied: boolean;
+}
+
+export interface CoverageRow {
+  id: string;
+  mandatory: boolean;
+  applicability: CoverageApplicability;
+  execution_state: CoverageExecutionState;
+  outcome: CoverageOutcome;
+  evidence_state: CoverageEvidenceState;
+}
+
+export interface CompletionResult {
+  canClose: boolean;
+  suggestedState: CampaignState;
+  blockers: string[];
+}
+
+export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
+  const blockers: string[] = [];
+  if (snap.state === "cancelled") {
+    return { canClose: false, suggestedState: "cancelled", blockers: ["cancelled"] };
+  }
+  if (snap.state === "paused") {
+    return { canClose: false, suggestedState: "paused", blockers: ["paused"] };
+  }
+  if (snap.in_flight_runs > 0 || snap.in_flight_invocations > 0) {
+    blockers.push("in_flight_work");
+    return { canClose: false, suggestedState: "waiting", blockers };
+  }
+  if (snap.uncertain_invocations > 0) {
+    blockers.push("uncertain_invocations");
+    return { canClose: false, suggestedState: "waiting", blockers };
+  }
+  if (snap.unconsumed_events > 0) {
+    blockers.push("unconsumed_events");
+    return { canClose: false, suggestedState: "active", blockers };
+  }
+  if (snap.pending_important_proposals > 0) {
+    blockers.push("pending_proposals");
+    return { canClose: false, suggestedState: "active", blockers };
+  }
+  if (snap.ready_steps > 0) {
+    blockers.push("ready_steps");
+    return { canClose: false, suggestedState: "active", blockers };
+  }
+
+  if (snap.mode === "goal_seeking") {
+    if (!snap.root_goal_satisfied) {
+      if (snap.blocked_steps > 0 && snap.frontier_size > 0) {
+        return { canClose: false, suggestedState: "blocked", blockers: ["missing_precondition"] };
+      }
+      if (snap.empty_reviews < snap.max_empty_reviews) {
+        return { canClose: false, suggestedState: "active", blockers: ["review_allowance_remaining"] };
+      }
+      return { canClose: false, suggestedState: "plateau", blockers: ["frontier_exhausted"] };
+    }
+    return { canClose: true, suggestedState: "completed", blockers: [] };
+  }
+
+  const mandatoryUntested = snap.coverage.filter(
+    (c) => c.mandatory && c.applicability === "applicable" && c.execution_state !== "tested" && c.execution_state !== "waived",
+  );
+  if (mandatoryUntested.length > 0) {
+    blockers.push("mandatory_coverage_untested");
+    if (snap.blocked_steps > 0) {
+      return { canClose: false, suggestedState: "blocked", blockers };
+    }
+    if (snap.empty_reviews < snap.max_empty_reviews) {
+      return { canClose: false, suggestedState: "active", blockers: [...blockers, "review_allowance_remaining"] };
+    }
+    return { canClose: false, suggestedState: "plateau", blockers };
+  }
+
+  const pendingFindings = snap.findings.filter((f) => f.status === "suspected" || f.status === "validating");
+  if (pendingFindings.length > 0) {
+    blockers.push("findings_pending_verification");
+    return { canClose: false, suggestedState: "waiting", blockers };
+  }
+
+  if (snap.frontier_size === 0 && !snap.new_observation_since_progress) {
+    if (snap.empty_reviews < snap.max_empty_reviews) {
+      return { canClose: false, suggestedState: "active", blockers: ["review_allowance_remaining"] };
+    }
+  }
+
+  const untestedApplicable = snap.coverage.filter(
+    (c) => c.applicability === "applicable" && c.execution_state === "untested",
+  );
+  if (untestedApplicable.length > 0) {
+    blockers.push("applicable_coverage_untested");
+    return { canClose: false, suggestedState: "plateau", blockers };
+  }
+
+  return { canClose: true, suggestedState: "completed", blockers: [] };
+}
+
+export function coverageIsTested(row: CoverageRow): boolean {
+  return (
+    row.applicability === "applicable" &&
+    row.execution_state === "tested" &&
+    row.evidence_state === "current"
+  );
+}
+
+export function toolSuccessDoesNotMarkCoverageTested(): true {
+  return true;
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.env
+artifacts/
+.rionext/
+.rionext-test/
+.rionext-smoke/
+coverage/
+*.log

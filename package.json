@@ -1,0 +1,30 @@
+{
+  "name": "rionext",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RioNext P0: Pi-backed persistent Decide/Execute harness",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "rionext": "./dist/src/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test \"./dist/tests/**/*.test.js\"",
+    "cli": "tsc -p tsconfig.json && node dist/src/cli/index.js",
+    "start": "node dist/src/cli/index.js",
+    "kali:pull": "docker pull kalilinux/kali-rolling",
+    "kali:build": "docker build -t rionext-kali:rolling -t rionext-kali:master docker/kali"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.4",
+    "@earendil-works/pi-ai": "0.84.4",
+    "typebox": "1.3.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "typescript": "5.9.3"
+  }
+}
