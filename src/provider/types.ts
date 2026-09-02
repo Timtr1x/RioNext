@@ -65,7 +65,7 @@ export const CONTEXT_MAX = 10_000_000;
 export const CONTEXT_DEFAULT = 256_000;
 export const OUTPUT_MIN = 64;
 export const OUTPUT_MAX = 1_000_000;
-export const OUTPUT_DEFAULT = 16_384;
+export const OUTPUT_DEFAULT = 51_200;
 
 export function isProtocol(v: string): v is Protocol {
   return (PROTOCOLS as readonly string[]).includes(v);

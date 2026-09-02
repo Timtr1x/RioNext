@@ -9,7 +9,10 @@ import { ProviderCatalog } from "../../src/provider/catalog.ts";
 import { completeBaseUrl } from "../../src/provider/paths.ts";
 import { testConnection } from "../../src/provider/probe.ts";
 import { resolveSlot, resolveVisionRoute } from "../../src/provider/router.ts";
+import { createCataloguedProviderStream } from "../../src/provider/stream.ts";
 import { buildProtocolBody, extractToolCall } from "../../src/provider/transform.ts";
+import { OUTPUT_DEFAULT } from "../../src/provider/types.ts";
+import { SCRIPTED_MODEL } from "../../src/runtime/pi/scripted-stream.ts";
 import { generateVisionProbePng, VISION_PHRASE, visionPassed } from "../../src/provider/visual-runtime.ts";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { Engine } from "../../src/controller/engine.ts";
@@ -245,4 +248,36 @@ test("catalog snapshot never includes api key", () => {
 test("extractToolCall sees anthropic tool_use", () => {
   assert.equal(extractToolCall("ANTHROPIC_MESSAGES", { content: [{ type: "tool_use", name: "echo_probe" }] }), true);
   assert.equal(extractToolCall("ANTHROPIC_MESSAGES", { content: [{ type: "text", text: "hi" }] }), false);
+});
+
+test("campaign catalogued stream uses model max_output default 51200", async () => {
+  assert.equal(OUTPUT_DEFAULT, 51_200);
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "qianfan",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://qianfan.baidubce.com/v2/tokenplan/personal",
+    api_key: "not-a-live-key",
+  });
+  const m = cat.addModel({ provider_id: p.id, name: "glm-5.2" });
+  assert.equal(m.max_output_tokens, 51_200);
+  let saw = 0;
+  const { stream } = createCataloguedProviderStream({
+    catalog: cat,
+    providerId: p.id,
+    modelName: "glm-5.2",
+    fetchFn: async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { max_tokens?: number };
+      saw = Number(body.max_tokens);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+    },
+  });
+  const s = await Promise.resolve(
+    stream(SCRIPTED_MODEL, {
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+    }),
+  );
+  await s.result();
+  assert.equal(saw, 51_200);
 });

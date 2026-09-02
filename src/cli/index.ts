@@ -64,7 +64,7 @@ rionext campaign reconcile --id <id> [--invocation <inv>] [--json]
 rionext campaign backup --out <dir>
 rionext campaign restore --from <dir>
 rionext provider add --name N --protocol ANTHROPIC_MESSAGES|OPENAI_CHAT_COMPLETIONS|OPENAI_RESPONSES --base-url URL --api-key KEY
-rionext provider model add --provider ID --name MODEL [--context 256000] [--max-output 16384] [--vision]
+rionext provider model add --provider ID --name MODEL [--context 256000] [--max-output 51200] [--vision]
 rionext provider test --provider ID --model ID_OR_NAME
 rionext provider slots --solver ID --visual ID --reflect none
 rionext provider ui [--port 7780]

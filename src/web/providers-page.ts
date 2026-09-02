@@ -56,7 +56,7 @@ export function providerUiHtml(): string {
       <label>模型名</label><input id="m-name" placeholder="claude-sonnet-4-6"/>
       <div class="row">
         <div><label>上下文窗口</label><input id="m-ctx" type="number" value="256000"/></div>
-        <div><label>最大输出 token</label><input id="m-out" type="number" value="16384"/></div>
+        <div><label>最大输出 token</label><input id="m-out" type="number" value="51200"/></div>
       </div>
       <label><input id="m-vision" type="checkbox"/> 视觉能力（不勾选则按模型名推断）</label>
       <button id="m-add">保存模型</button>

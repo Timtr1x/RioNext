@@ -19,7 +19,7 @@ node dist/src/cli/index.js campaign start --id camp_demo_lab --data-dir .rionext
 
 ```
 node dist/src/cli/index.js provider add --name "Anthropic" --protocol ANTHROPIC_MESSAGES --base-url https://api.anthropic.com --api-key $KEY --data-dir .rionext
-node dist/src/cli/index.js provider model add --provider prv_... --name claude-sonnet-4-6 --context 256000 --max-output 16384 --data-dir .rionext
+node dist/src/cli/index.js provider model add --provider prv_... --name claude-sonnet-4-6 --context 256000 --max-output 51200 --data-dir .rionext
 node dist/src/cli/index.js provider test --provider prv_... --model claude-sonnet-4-6 --data-dir .rionext
 node dist/src/cli/index.js provider slots --solver mdl_... --visual mdl_... --reflect none --data-dir .rionext
 node dist/src/cli/index.js provider ui --port 7780 --data-dir .rionext

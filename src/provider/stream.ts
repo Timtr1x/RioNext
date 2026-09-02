@@ -8,6 +8,7 @@ import {
 import type { ProviderCatalog } from "./catalog.ts";
 import { postJson, type FetchFn } from "./client.ts";
 import { buildProtocolBody, extractText, extractUsage } from "./transform.ts";
+import { OUTPUT_DEFAULT } from "./types.ts";
 
 export interface CataloguedStreamStats {
   attempts: number;
@@ -21,6 +22,12 @@ export interface CataloguedStreamOpts {
   maxRetries?: number;
   timeoutMs?: number;
   apiKey?: string;
+}
+
+function campaignMaxTokens(opts: CataloguedStreamOpts, requested?: number): number {
+  if (typeof requested === "number" && requested > 0) return requested;
+  const rec = opts.catalog.listModels(opts.providerId).find((m) => m.name === opts.modelName);
+  return rec?.max_output_tokens ?? OUTPUT_DEFAULT;
 }
 
 function userText(context: Context): string {
@@ -55,7 +62,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         model: opts.modelName,
         system: context.systemPrompt,
         user: userText(context),
-        max_tokens: options?.maxTokens ?? 64,
+        max_tokens: campaignMaxTokens(opts, options?.maxTokens),
       });
       const cap = Math.min(maxRetries, options?.maxRetries ?? maxRetries);
       let lastErr = "provider_error";
