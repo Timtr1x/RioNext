@@ -57,6 +57,23 @@ export const KALI_BINARIES = new Set([
 
 export const KALI_INTERPRETERS = new Set(["bash", "sh", "python3"]);
 export const KALI_PATH_BINS = new Set(["mkdir", "chmod", "tee", "rm", "cp", "mv"]);
+/** Scanners that must not block the Execute slot. Detached docker exec + poll. */
+export const KALI_BACKGROUND_BINS = new Set([
+  "nmap",
+  "nuclei",
+  "katana",
+  "gobuster",
+  "ffuf",
+  "nikto",
+  "sqlmap",
+  "whatweb",
+  "dalfox",
+  "cloudfox",
+  "kerbrute",
+  "httpx-toolkit",
+  "httpx-pd",
+  "wget",
+]);
 
 export function isAllowedKaliBin(bin: string): boolean {
   if (!/^[A-Za-z0-9_.+-]+$/.test(bin)) return false;
@@ -104,6 +121,8 @@ export const DEFAULT_KALI_LIMITS = {
   pids: 512,
   maxOutputBytes: 1_000_000,
   maxRuntimeMs: 60_000,
+  maxBackgroundRuntimeMs: 30 * 60_000,
+  pollIntervalMs: 2_000,
   maxWorkspaceBytes: 512_000_000,
   ratePerHost: 20,
   rateWindowMs: 60_000,
@@ -111,6 +130,11 @@ export const DEFAULT_KALI_LIMITS = {
 
 export function isKaliProfile(profile: string): boolean {
   return profile === "kali" || profile === "docker-kali";
+}
+
+export function shouldBackgroundKali(bin: string, timeoutMs?: number): boolean {
+  if (KALI_BACKGROUND_BINS.has(bin)) return true;
+  return typeof timeoutMs === "number" && timeoutMs > DEFAULT_KALI_LIMITS.maxRuntimeMs;
 }
 
 export function assertKaliArgv(bin: string, args: string[]): void {

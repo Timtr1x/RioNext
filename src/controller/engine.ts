@@ -35,6 +35,7 @@ export interface EngineOptions {
   effectAdapter?: EffectAdapter;
   dockerCli?: DockerCli;
   kaliResolve?: ResolveFn;
+  pollWaitMs?: number;
 }
 
 export class Engine {
@@ -109,7 +110,7 @@ export class Engine {
       this.storage.setCampaignState(campaignId, "active", { kind: "user", id: "cli" });
     }
     if (camp0.state === "cancelled") return;
-    this.dispatchGate.recover(campaignId);
+    await this.pollOperations(campaignId);
     await this.runLoop(campaignId);
   }
 
@@ -173,8 +174,71 @@ export class Engine {
     }));
   }
 
-  reconcile(campaignId: string): { prepared_released: number; marked_uncertain: number; reconciled: number } {
-    return this.dispatchGate.recover(campaignId);
+  reconcile(
+    campaignId: string,
+    invocationId?: string,
+  ): Promise<{ prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number }> {
+    return this.pollOperations(campaignId, invocationId);
+  }
+
+  async pollOperations(
+    campaignId: string,
+    invocationId?: string,
+  ): Promise<{ prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number }> {
+    const pending = this.storage
+      .listOperations(campaignId)
+      .filter((o) => ["running", "unknown"].includes(String(o.state)))
+      .filter((o) => !invocationId || String(o.invocation_id) === invocationId);
+    const rec = this.dispatchGate.recover(campaignId, invocationId);
+    for (const op of pending) {
+      const now = this.storage.getOperation(String(op.execution_id));
+      if (!now) continue;
+      const st = String(now.state);
+      if (st === "completed" || st === "failed") {
+        await this.ingestKaliOperation(campaignId, String(now.execution_id), String(now.invocation_id ?? ""));
+      }
+    }
+    return rec;
+  }
+
+  private async ingestKaliOperation(campaignId: string, executionId: string, invocationId: string): Promise<void> {
+    if (!executionId.startsWith("kali_")) return;
+    try {
+      const result = this.kali.collectBackground(this.kaliOpts(campaignId), executionId);
+      const art = await this.storage.putArtifact(
+        campaignId,
+        `${result.stdout}\n${result.stderr}`.trim() || "(empty)",
+        "text/plain",
+        invocationId || campaignId,
+      );
+      let runId: string | undefined;
+      try {
+        if (invocationId) runId = String(this.invocations.get(invocationId).run_id);
+      } catch {
+        runId = undefined;
+      }
+      if (!runId) {
+        const row = this.storage.store.db
+          .prepare("SELECT id FROM task_runs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1")
+          .get(campaignId) as { id: string } | undefined;
+        runId = row?.id;
+      }
+      if (!runId) return;
+      this.storage.recordObservation({
+        campaign_id: campaignId,
+        producer_id: runId,
+        submission_id: `op-${executionId}`,
+        run_id: runId,
+        attempt_id: runId,
+        subject: `kali_op:${executionId}`,
+        body: { code: result.code, truncated: result.truncated, timedOut: result.timedOut, stderr: result.stderr.slice(0, 4000) },
+        artifact_refs: [art.id],
+        conditions: {},
+        env_rev: this.storage.getCampaign(campaignId).spec.environment_revision,
+      });
+    } catch {
+      // missing files or finished run: leave the operations row as the record
+    }
   }
 
   async runLoop(campaignId: string): Promise<void> {
@@ -182,6 +246,7 @@ export class Engine {
     for (let i = 0; i < maxCycles; i++) {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused") break;
+      const polled = await this.pollOperations(campaignId);
       this.storage.consumeEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
       if (!this.budget.canAdmit(campaignId, 1, 0, 0)) {
@@ -210,6 +275,11 @@ export class Engine {
       this.storage.recomputeStepReadiness(campaignId);
       const snap = this.snapshot(campaignId);
       const decision = evaluateCompletion(snap);
+      if (decision.suggestedState === "waiting" && polled.still_running > 0 && i < maxCycles - 1) {
+        const wait = this.options.pollWaitMs ?? 2_000;
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
       if (decision.canClose) {
         const { H } = enterClosing(this, campaignId);
         this.storage.consumeEvents(campaignId);

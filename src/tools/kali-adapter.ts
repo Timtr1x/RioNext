@@ -1,5 +1,5 @@
 import type { EffectAdapter } from "./effect-adapter.ts";
-import { KALI_BINARIES } from "./kali-profile.ts";
+import { KALI_BINARIES, shouldBackgroundKali } from "./kali-profile.ts";
 import type { KaliStartOpts, KaliRuntime } from "./kali-runtime.ts";
 
 export interface KaliPayload {
@@ -35,7 +35,7 @@ export class KaliEffectAdapter implements EffectAdapter {
     private readonly optsFor: (invocationId: string) => KaliStartOpts,
   ) {}
 
-  send(invocationId: string, payload: unknown): { execution_id: string } {
+  send(invocationId: string, payload: unknown): { execution_id: string; pending?: boolean } {
     if (!isKaliPayload(payload)) throw new Error("not a kali payload");
     this.n += 1;
     const execution_id = `kali_${invocationId}`;
@@ -58,8 +58,12 @@ export class KaliEffectAdapter implements EffectAdapter {
             : this.runtime.exec(opts, String(payload.bin ?? "nmap"), payload.args ?? [], {
                 url: payload.url,
                 redirects: payload.redirects,
+                timeout_ms: payload.timeout_ms,
+                executionId: execution_id,
+                background: shouldBackgroundKali(String(payload.bin ?? "nmap"), payload.timeout_ms),
               });
-      this.last.set(execution_id, result.code === 0 ? "completed" : "failed");
+      const pending = Boolean((result as { pending?: boolean }).pending);
+      this.last.set(execution_id, pending ? "unknown" : result.code === 0 ? "completed" : "failed");
       (payload as KaliPayload & { _result?: unknown })._result = {
         stdout: result.stdout,
         stderr: result.stderr,
@@ -67,28 +71,35 @@ export class KaliEffectAdapter implements EffectAdapter {
         truncated: result.truncated,
         container: result.container,
         timedOut: result.timedOut,
+        pending,
       };
+      return { execution_id, pending };
     } catch (err) {
       this.last.set(execution_id, "failed");
       throw err;
     }
-    return { execution_id };
   }
 
   query(executionId: string): "unknown" | "completed" | "failed" {
     const mem = this.last.get(executionId);
     if (mem === "completed" || mem === "failed") return mem;
-    let campaignId: string | undefined;
     try {
       const invId = executionId.startsWith("kali_") ? executionId.slice("kali_".length) : "";
-      if (invId) campaignId = this.optsFor(invId).campaignId;
+      if (invId) {
+        const opts = this.optsFor(invId);
+        const bg = this.runtime.backgroundStatus(opts, executionId);
+        if (bg === "completed" || bg === "failed") {
+          this.last.set(executionId, bg);
+          return bg;
+        }
+        const box = this.runtime.inspectCampaign(opts.campaignId);
+        if (box === "missing" || box === "exited") return "failed";
+        return "unknown";
+      }
     } catch {
-      campaignId = undefined;
+      // invocation missing after restart
     }
-    if (!campaignId) return mem ?? "unknown";
-    const box = this.runtime.inspectCampaign(campaignId);
-    if (box === "missing" || box === "exited") return "failed";
-    return "unknown";
+    return mem ?? "unknown";
   }
 
   sendCount(): number {

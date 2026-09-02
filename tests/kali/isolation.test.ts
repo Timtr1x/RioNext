@@ -428,7 +428,7 @@ test("K08 unknown-effect lock survives finishRun and is released only after canc
   e.close();
 });
 
-test("env dispatch writes an operations row and recover does not docker run again", () => {
+test("env dispatch writes an operations row and recover does not docker run again", async () => {
   const dir = tmp();
   const docker = new FakeDockerCli();
   docker.next = { stdout: JSON.stringify({ ok: true, elements: [] }), stderr: "", code: 0, timedOut: false };
@@ -445,7 +445,7 @@ test("env dispatch writes an operations row and recover does not docker run agai
   assert.equal(sent.status, "sent");
   assert.equal(e.storage.getOperation(sent.execution_id!)?.execution_id, sent.execution_id);
   const runs = docker.calls.filter((c) => c[0] === "run").length;
-  e.reconcile("t-k09");
+  await e.reconcile("t-k09");
   assert.equal(docker.calls.filter((c) => c[0] === "run").length, runs);
   const listed = e.listOperations("t-k09");
   assert.equal(listed.length, 1);
@@ -511,6 +511,43 @@ test("K08 successful kali dispatch releases locks so the next call can run", () 
     envTool: true,
   });
   assert.equal(again.status, "sent");
+  e.close();
+});
+
+test("nmap is detached so dispatch does not wait, then poll ingests when exit file appears", async () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  const e = kaliEngine(dir, docker);
+  e.createCampaign(loadKaliSpec("t-bg"));
+  const lease = kaliLease(e, "t-bg");
+  const t0 = Date.now();
+  const sent = e.dispatchGate.dispatch({
+    lease,
+    purpose: "kali_run",
+    payload: { kind: "kali", bin: "nmap", args: ["-sn", "10.0.0.8"] },
+    effect: "unknown",
+    envTool: true,
+  });
+  assert.ok(Date.now() - t0 < 2_000);
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.pending, true);
+  assert.equal(e.storage.getOperation(sent.execution_id!)?.state, "running");
+  assert.ok(docker.calls.some((c) => c[0] === "exec" && c.includes("-d")));
+  assert.ok(e.storage.listResourceLocks("t-bg").length >= 1);
+  const rec = await e.reconcile("t-bg");
+  assert.equal(rec.still_running, 1);
+  const opDir = join(dir, "workspace", "t-bg", ".rionext-ops");
+  const id = String(sent.execution_id).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  mkdirSync(opDir, { recursive: true });
+  writeFileSync(join(opDir, `${id}.out`), "Nmap done: 1 IP up");
+  writeFileSync(join(opDir, `${id}.err`), "");
+  writeFileSync(join(opDir, `${id}.exit`), "0\n");
+  const done = await e.reconcile("t-bg");
+  assert.equal(done.still_running, 0);
+  assert.ok(done.reconciled >= 1);
+  assert.equal(e.storage.listResourceLocks("t-bg").length, 0);
+  const obs = e.storage.list("observations", "t-bg");
+  assert.ok(obs.some((o) => String(o.subject).startsWith("kali_op:")));
   e.close();
 });
 

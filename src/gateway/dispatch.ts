@@ -39,6 +39,7 @@ export interface DispatchResult {
   reason?: string;
   invocation_id: string;
   execution_id?: string;
+  pending?: boolean;
 }
 
 /**
@@ -102,6 +103,17 @@ export class DispatchGate {
       this.storage.store.db
         .prepare("UPDATE invocations SET external_id = ?, updated_at = datetime('now') WHERE id = ?")
         .run(sent.execution_id, permit.invocation_id);
+      if (sent.pending) {
+        const next = new Date(Date.now() + 2_000).toISOString();
+        this.storage.registerOperation(req.lease.campaign_id, permit.invocation_id, sent.execution_id, "running");
+        this.storage.updateOperationState(sent.execution_id, "running", next);
+        return {
+          status: "sent",
+          invocation_id: permit.invocation_id,
+          execution_id: sent.execution_id,
+          pending: true,
+        };
+      }
       this.storage.registerOperation(req.lease.campaign_id, permit.invocation_id, sent.execution_id, "completed");
       this.invocations.mark(permit.invocation_id, "completed");
       this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
@@ -134,11 +146,17 @@ export class DispatchGate {
     return r;
   }
 
-  recover(campaignId: string): { prepared_released: number; marked_uncertain: number; reconciled: number } {
-    const rows = this.invocations.nonTerminal(campaignId);
+  recover(
+    campaignId: string,
+    invocationId?: string,
+  ): { prepared_released: number; marked_uncertain: number; reconciled: number; still_running: number } {
+    const rows = this.invocations
+      .nonTerminal(campaignId)
+      .filter((row) => !invocationId || String(row.id) === invocationId);
     let prepared_released = 0;
     let marked_uncertain = 0;
     let reconciled = 0;
+    let still_running = 0;
     for (const row of rows) {
       const id = String(row.id);
       const state = String(row.state) as InvocationState;
@@ -152,18 +170,22 @@ export class DispatchGate {
         const cost = Number(row.reserved_cost ?? 0);
         this.budget.markLiability(campaignId, id, reserved, tokens, cost);
         const ext = row.external_id ? String(row.external_id) : null;
-        if (ext && this.adapter.query(ext) === "completed") {
+        const q = ext ? this.adapter.query(ext) : "unknown";
+        if (ext && q === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reserved, reserved, tokens, tokens, cost, cost);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);
           this.storage.updateOperationState(ext, "completed");
           reconciled += 1;
-        } else if (ext && this.adapter.query(ext) === "failed") {
+        } else if (ext && q === "failed") {
           this.invocations.mark(id, "failed_known");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, 0, reserved, 0, tokens, 0, cost);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);
           this.storage.updateOperationState(ext, "failed");
           reconciled += 1;
+        } else if (state === "running" && ext) {
+          this.storage.updateOperationState(ext, "running", new Date(Date.now() + 2_000).toISOString());
+          still_running += 1;
         } else {
           this.invocations.mark(id, "uncertain");
           if (ext) this.storage.updateOperationState(ext, "unknown");
@@ -187,7 +209,7 @@ export class DispatchGate {
         }
       }
     }
-    return { prepared_released, marked_uncertain, reconciled };
+    return { prepared_released, marked_uncertain, reconciled, still_running };
   }
 
   archiveLateResult(campaignId: string, invocationId: string, body: unknown): void {

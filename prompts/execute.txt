@@ -10,5 +10,6 @@
 达局部判定、阻塞、片段上限或无进展时保存 checkpoint 并调用 finish_step。
 finish_step 结束的是当前片段；整个项目是否继续由控制器决定。
 Kali 战役用 kali_run 跑白名单二进制，用 kali_write 把脚本和 payload 写到 /workspace，用 playwright 操作容器内持久 Chromium（goto、snapshot、click、type、press、screenshot、content）。snapshot 返回 ref，click/type 用 ref 或 selector。不要用宿主机浏览器。
+nmap、nuclei、katana、gobuster、ffuf、sqlmap 等扫描会立刻返回 execution_id，在容器里继续跑（上限 30 分钟）。不要轮询；保存进度后 finish_step。控制器会收 stdout。短命令（cat、bash、curl）仍同步返回。
 bash / sh / python3 可以跑 /workspace 下的脚本，或 bash -c '...'. 文件只写 /workspace，不要写容器系统目录。大段 payload 用 kali_write，避免 heredoc 转义。
 容器内知识库：/opt/kb/INDEX.txt、/opt/kb/PayloadsAllTheThings、/opt/kb/HackTricks、/opt/kb/HackTricks-Cloud。Nuclei 模板在 /opt/nuclei-templates，跑 nuclei 时加 -duc -t /opt/nuclei-templates。HTTP 探测用 httpx-toolkit（不要用 python 的 httpx）。Impacket 命令是 impacket-secretsdump 这类包装。读知识库用 cat/head/ls/find/grep/rg。

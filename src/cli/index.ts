@@ -69,10 +69,25 @@ rionext provider test --provider ID --model ID_OR_NAME
 rionext provider slots --solver ID --visual ID --reflect none
 rionext provider ui [--port 7780]
 rionext kali status|pull|build|protect|smoke
+rionext health
 rionext baseline --spec <file>`);
     return;
   }
   const dir = dataDir(flags);
+  if (cmd === "health") {
+    const kali = handleKaliCommand(["status"]) as Record<string, unknown>;
+    print(
+      {
+        docker: kali.docker ?? false,
+        kali_master: kali.master_present ?? false,
+        kali_image: kali.image ?? null,
+        data_dir: dir,
+        note: "Health is controller/docker/image only. It is not campaign completion.",
+      },
+      true,
+    );
+    return;
+  }
   if (cmd === "kali") {
     try {
       const rest = process.argv.slice(2).filter((a) => a !== "kali" && a !== "campaign");
@@ -178,9 +193,11 @@ rionext baseline --spec <file>`);
       case "operations":
         print({ operations: engine.listOperations(id) }, Boolean(flags.json) || true);
         break;
-      case "reconcile":
-        print({ reconcile: engine.reconcile(id), invocation: flags.invocation ?? null }, Boolean(flags.json) || true);
+      case "reconcile": {
+        const inv = typeof flags.invocation === "string" ? flags.invocation : undefined;
+        print({ reconcile: await engine.reconcile(id, inv), invocation: inv ?? null }, Boolean(flags.json) || true);
         break;
+      }
       case "backup": {
         const out = flags.out;
         if (typeof out !== "string") throw new Error("--out is required");

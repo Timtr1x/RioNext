@@ -70,6 +70,9 @@ export class FakeDockerCli implements DockerCli {
       }
       return { stdout: "", stderr: "No such image", code: 1, timedOut: false };
     }
+    if (argv[0] === "exec" && argv.includes("-d")) {
+      return { stdout: "", stderr: "", code: 0, timedOut: false };
+    }
     if (argv[0] === "run" && argv.includes("-d")) {
       const name = nameFrom(argv);
       if (name) {

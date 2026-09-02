@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface EffectAdapter {
-  send(invocationId: string, payload: unknown): { execution_id: string };
+  send(invocationId: string, payload: unknown): { execution_id: string; pending?: boolean };
   query(executionId: string): "unknown" | "completed" | "failed";
   sendCount(): number;
 }

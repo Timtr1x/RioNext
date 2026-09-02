@@ -1,11 +1,20 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DomainError } from "../domain/errors.ts";
 import type { DockerCli, DockerExecResult } from "./docker-cli.ts";
 import { ProcessDockerCli } from "./docker-cli.ts";
 import { checkEgress, checkRedirect, parseAllowList, parseDestination, type AllowEntry, type ResolveFn } from "./egress.ts";
-import { assertKaliArgv, DEFAULT_KALI_LIMITS, KALI_IMAGE, KALI_KEEPER_NAME, KALI_MASTER_TAG, PLAYWRIGHT_OPS, workspaceRelPath } from "./kali-profile.ts";
+import {
+  assertKaliArgv,
+  DEFAULT_KALI_LIMITS,
+  KALI_IMAGE,
+  KALI_KEEPER_NAME,
+  KALI_MASTER_TAG,
+  PLAYWRIGHT_OPS,
+  shouldBackgroundKali,
+  workspaceRelPath,
+} from "./kali-profile.ts";
 
 export interface KaliStartOpts {
   campaignId: string;
@@ -269,8 +278,8 @@ export class KaliRuntime {
     opts: KaliStartOpts,
     bin: string,
     args: string[],
-    extra?: { url?: string; redirects?: string[] },
-  ): DockerExecResult & { truncated: boolean; container: string } {
+    extra?: { url?: string; redirects?: string[]; timeout_ms?: number; executionId?: string; background?: boolean },
+  ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
     assertKaliArgv(bin, args);
     const allow = parseAllowList(opts.allowAssets);
     const resolve = opts.resolve ?? ((h: string) => defaultResolve(h));
@@ -284,9 +293,15 @@ export class KaliRuntime {
       throw new DomainError("disk_cap", "workspace disk occupancy exceeds limit", "denied");
     }
     const spec = this.ensure(opts);
-    const argv = ["exec", "-w", "/workspace", spec.name, "timeout", String(Math.ceil(DEFAULT_KALI_LIMITS.maxRuntimeMs / 1000)), bin, ...args];
+    const background = extra?.background ?? shouldBackgroundKali(bin, extra?.timeout_ms);
+    if (background) {
+      const executionId = extra?.executionId ?? `kali_${opts.campaignId}_${Date.now()}`;
+      return this.execBackground(opts, spec.name, bin, args, executionId, extra?.timeout_ms);
+    }
+    const capSec = Math.ceil((extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) / 1000);
+    const argv = ["exec", "-w", "/workspace", spec.name, "timeout", String(capSec), bin, ...args];
     const result = this.docker.run(argv, {
-      timeoutMs: DEFAULT_KALI_LIMITS.maxRuntimeMs + 5_000,
+      timeoutMs: (extra?.timeout_ms ?? DEFAULT_KALI_LIMITS.maxRuntimeMs) + 5_000,
       maxBytes: DEFAULT_KALI_LIMITS.maxOutputBytes,
     });
     const truncated =
@@ -294,6 +309,80 @@ export class KaliRuntime {
       result.stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
     if (result.timedOut) this.kill(opts.campaignId);
     const out = { ...result, truncated, container: spec.name };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  collectBackground(
+    opts: KaliStartOpts,
+    executionId: string,
+  ): DockerExecResult & { truncated: boolean; container: string; pending?: boolean } {
+    const files = opFiles(opts.workspaceHost, executionId);
+    const stdout = existsSync(files.out) ? readFileSync(files.out, "utf8") : "";
+    const stderr = existsSync(files.err) ? readFileSync(files.err, "utf8") : "";
+    const codeRaw = existsSync(files.exit) ? Number(readFileSync(files.exit, "utf8").trim()) : 1;
+    const code = Number.isFinite(codeRaw) ? codeRaw : 1;
+    const truncated =
+      stdout.length >= DEFAULT_KALI_LIMITS.maxOutputBytes || stderr.length >= DEFAULT_KALI_LIMITS.maxOutputBytes;
+    const out = {
+      stdout: stdout.slice(0, DEFAULT_KALI_LIMITS.maxOutputBytes),
+      stderr: stderr.slice(0, DEFAULT_KALI_LIMITS.maxOutputBytes),
+      code,
+      timedOut: code === 124,
+      truncated,
+      container: containerName(opts.campaignId),
+      pending: false,
+    };
+    this.last.set(opts.campaignId, out);
+    return out;
+  }
+
+  backgroundStatus(opts: KaliStartOpts, executionId: string): "unknown" | "completed" | "failed" {
+    const files = opFiles(opts.workspaceHost, executionId);
+    if (existsSync(files.exit)) {
+      const code = Number(readFileSync(files.exit, "utf8").trim());
+      return code === 0 ? "completed" : "failed";
+    }
+    const box = this.inspectCampaign(opts.campaignId);
+    if (box === "missing" || box === "exited") return "failed";
+    return "unknown";
+  }
+
+  private execBackground(
+    opts: KaliStartOpts,
+    container: string,
+    bin: string,
+    args: string[],
+    executionId: string,
+    timeoutMs?: number,
+  ): DockerExecResult & { truncated: boolean; container: string; pending: boolean } {
+    const files = opFiles(opts.workspaceHost, executionId);
+    mkdirSync(dirname(files.sh), { recursive: true });
+    const capSec = Math.ceil((timeoutMs ?? DEFAULT_KALI_LIMITS.maxBackgroundRuntimeMs) / 1000);
+    const quoted = [bin, ...args].map(shQuote).join(" ");
+    const script = [
+      "#!/bin/sh",
+      "set +e",
+      `timeout ${capSec} ${quoted} > ${shQuote(files.containerOut)} 2> ${shQuote(files.containerErr)}`,
+      `echo $? > ${shQuote(files.containerExit)}`,
+      "",
+    ].join("\n");
+    writeFileSync(files.sh, script, { encoding: "utf8" });
+    const started = this.docker.run(["exec", "-d", "-w", "/workspace", container, "sh", files.containerSh], {
+      timeoutMs: 15_000,
+    });
+    if (started.code !== 0) {
+      throw new DomainError("kali_start", started.stderr || "background exec failed", "protocol_error");
+    }
+    const out = {
+      stdout: JSON.stringify({ pending: true, execution_id: executionId, path: files.containerOut }),
+      stderr: "",
+      code: 0,
+      timedOut: false,
+      truncated: false,
+      container,
+      pending: true as const,
+    };
     this.last.set(opts.campaignId, out);
     return out;
   }
@@ -397,4 +486,32 @@ function looksLikeHostArg(args: string[]): boolean {
       /^\d{1,3}(\.\d{1,3}){3}/.test(a) ||
       (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(a) && !a.startsWith("-")),
   );
+}
+
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function opFiles(workspaceHost: string, executionId: string): {
+  sh: string;
+  out: string;
+  err: string;
+  exit: string;
+  containerSh: string;
+  containerOut: string;
+  containerErr: string;
+  containerExit: string;
+} {
+  const id = executionId.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const dir = join(workspaceHost, ".rionext-ops");
+  return {
+    sh: join(dir, `${id}.sh`),
+    out: join(dir, `${id}.out`),
+    err: join(dir, `${id}.err`),
+    exit: join(dir, `${id}.exit`),
+    containerSh: `/workspace/.rionext-ops/${id}.sh`,
+    containerOut: `/workspace/.rionext-ops/${id}.out`,
+    containerErr: `/workspace/.rionext-ops/${id}.err`,
+    containerExit: `/workspace/.rionext-ops/${id}.exit`,
+  };
 }
