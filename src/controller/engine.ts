@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { RuntimeConfig } from "../contracts/config.ts";
 import { configFingerprint, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../contracts/config.ts";
@@ -13,6 +13,9 @@ import { BudgetLedger } from "../gateway/budget-ledger.ts";
 import { DispatchGate } from "../gateway/dispatch.ts";
 import { ModelGateway, ToolGateway } from "../gateway/gateways.ts";
 import { InvocationBook } from "../gateway/invocation.ts";
+import { ProviderCatalog } from "../provider/catalog.ts";
+import { resolveSlot } from "../provider/router.ts";
+import { createCataloguedProviderStream } from "../provider/stream.ts";
 import { PiWorkerFactory, type PiWorker } from "../runtime/pi/factory.ts";
 import type { TurnChooser } from "../runtime/pi/scripted-stream.ts";
 import type { DockerCli } from "../tools/docker-cli.ts";
@@ -24,6 +27,7 @@ import { ArtifactStore } from "../storage/artifacts.ts";
 import { backupStore, restoreStore, type BackupReport, type RestoreReport } from "../storage/backup.ts";
 import { Store } from "../storage/db.ts";
 import { StorageService } from "../storage/service.ts";
+import { confirmFindingIfCurrent } from "../verification/verdict.ts";
 import { freshWorld, oracleGoalSatisfied, type LabWorld } from "../tools/synthetic.ts";
 import { SCHEMA_VERSION } from "../version.ts";
 
@@ -68,9 +72,20 @@ export class Engine {
     const kaliAdapter = new KaliEffectAdapter(this.kali, (invocationId) => this.kaliOptsForInvocation(invocationId));
     const adapter = new RoutingEffectAdapter(fileAdapter, kaliAdapter);
     this.dispatchGate = new DispatchGate(this.storage, this.budget, this.invocations, adapter);
+    const live = options.chooseDecide || options.chooseExecute ? null : tryLiveCatalog(configIn.data_dir);
     this.factory = new PiWorkerFactory({
       storage: this.storage,
-      modelGatewayFor: (lease, inner) => new ModelGateway(this.storage, this.budget, this.invocations, inner, lease, "scripted"),
+      modelGatewayFor: (lease, inner) =>
+        new ModelGateway(
+          this.storage,
+          this.budget,
+          this.invocations,
+          inner,
+          lease,
+          live?.modelName ?? "scripted",
+          live?.providerId ?? "scripted",
+          live?.reserveTokens ?? 16,
+        ),
       toolGatewayFor: (lease) => new ToolGateway(this.storage, this.budget, this.invocations, lease, this.dispatchGate),
       chooseDecide: options.chooseDecide ?? decideChooser(),
       chooseExecute: options.chooseExecute ?? executeChooser(),
@@ -79,6 +94,7 @@ export class Engine {
         execute: this.config.max_execute_turns_per_run,
       }),
       kali: this.kali,
+      liveStream: live?.stream,
     });
   }
 
@@ -104,7 +120,8 @@ export class Engine {
 
   async start(campaignId: string): Promise<void> {
     this.banner();
-    this.storage.acquireControllerLock(campaignId, this.config.instance_id);
+    this.storage.acquireControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
+    this.storage.recoverStaleRuns(campaignId);
     const camp0 = this.storage.getCampaign(campaignId);
     if (camp0.state === "created") {
       this.storage.setCampaignState(campaignId, "active", { kind: "user", id: "cli" });
@@ -247,7 +264,8 @@ export class Engine {
       const camp = this.storage.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused") break;
       const polled = await this.pollOperations(campaignId);
-      this.storage.consumeEvents(campaignId);
+      this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
+      this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
       if (!this.budget.canAdmit(campaignId, 1, 0, 0)) {
         if (camp.state !== "budget_paused") {
@@ -271,7 +289,7 @@ export class Engine {
       if (this.budget.canAdmit(campaignId, 1, 0, 0)) {
         await this.runExecuteSlot(campaignId);
       }
-      this.storage.consumeEvents(campaignId);
+      this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
       const snap = this.snapshot(campaignId);
       const decision = evaluateCompletion(snap);
@@ -282,7 +300,7 @@ export class Engine {
       }
       if (decision.canClose) {
         const { H } = enterClosing(this, campaignId);
-        this.storage.consumeEvents(campaignId);
+        this.storage.consumeReviewedEvents(campaignId);
         const committed = commitCompletion(this, campaignId, H);
         if (!committed.ok) {
           const now = this.storage.getCampaign(campaignId);
@@ -336,7 +354,7 @@ export class Engine {
       attempt_no: 1,
       fence: claimed.fence,
       cancel_epoch: camp.cancel_epoch,
-      deadline_ms: Date.now() + this.config.lease_ttl_ms,
+      deadline_ms: this.leaseDeadline(camp),
       lease_owner: this.config.instance_id,
       continuation_of: null,
     };
@@ -356,11 +374,18 @@ export class Engine {
       attempt_no: claimed.attempt_no,
       fence: claimed.fence,
       cancel_epoch: camp.cancel_epoch,
-      deadline_ms: Date.now() + this.config.lease_ttl_ms,
+      deadline_ms: this.leaseDeadline(camp),
       lease_owner: this.config.instance_id,
       continuation_of: null,
     };
     return this.runWorker(lease);
+  }
+
+  private leaseDeadline(camp: { spec: CampaignSpec }): number {
+    const leaseEnd = Date.now() + this.config.lease_ttl_ms;
+    const campaignEnd = camp.spec.budget.deadline_ms;
+    if (campaignEnd != null && campaignEnd > 0) return Math.min(leaseEnd, campaignEnd);
+    return leaseEnd;
   }
 
   async runWorker(lease: RunLease): Promise<TaskOutcome> {
@@ -371,6 +396,7 @@ export class Engine {
     await worker.start(lease, ctx, ctrl.signal);
     const outcome = await worker.settle();
     this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
+    this.afterExecute(lease, outcome);
     if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
     if (worker.toolGateway) {
       this.toolSends += worker.toolGateway.toolSends;
@@ -406,7 +432,7 @@ export class Engine {
       in_flight_runs: inFlightRuns,
       in_flight_invocations: inFlightInv,
       unconsumed_events: this.storage.unconsumedCount(campaignId),
-      pending_important_proposals: 0,
+      pending_important_proposals: pendingImportant(this.storage, campaignId),
       uncertain_invocations: this.invocations
         .nonTerminal(campaignId)
         .filter((i) => i.state === "uncertain").length,
@@ -415,10 +441,10 @@ export class Engine {
       ready_steps: counts.ready,
       blocked_steps: counts.blocked,
       frontier_size: counts.frontier,
-      new_observation_since_progress: false,
+      new_observation_since_progress: this.storage.unconsumedCount(campaignId) > 0,
       findings,
       coverage,
-      root_goal_satisfied: oracleGoalSatisfied(world) && camp.spec.mode === "goal_seeking",
+      root_goal_satisfied: rootGoalSatisfied(camp.spec, this.storage, campaignId, world),
     };
   }
 
@@ -532,8 +558,96 @@ export class Engine {
   }
 
   close(): void {
+    try {
+      this.storage.releaseAllControllerLocks(this.config.instance_id);
+    } catch {
+      // closing after a storage fault still shuts the handle
+    }
     this.storage.close();
   }
+
+  private afterExecute(lease: RunLease, outcome: TaskOutcome): void {
+    if (lease.mode !== "execute") return;
+    const camp = this.storage.getCampaign(lease.campaign_id);
+    const world = this.storage.getWorld<LabWorld>(lease.campaign_id, freshWorld());
+    if (lease.kind === "verify" && outcome.reason === "resolved") {
+      const ids = outcome.finding_ids.length
+        ? outcome.finding_ids
+        : this.storage
+            .list("findings", lease.campaign_id)
+            .filter((f) => f.status === "suspected" || f.status === "validating")
+            .map((f) => String(f.id));
+      for (const id of ids) {
+        confirmFindingIfCurrent(this.storage, lease.campaign_id, id, world.env_rev);
+      }
+    }
+    if (lease.step_id && outcome.reason === "resolved") {
+      const step = this.storage.store.db.prepare("SELECT method_family FROM steps WHERE id = ?").get(lease.step_id) as
+        | { method_family: string }
+        | undefined;
+      if (step?.method_family) {
+        const arts = Number(
+          (this.storage.store.db.prepare("SELECT COUNT(*) AS c FROM artifacts WHERE campaign_id = ?").get(lease.campaign_id) as { c: number }).c,
+        );
+        this.storage.updateCoverage(lease.campaign_id, step.method_family, {
+          execution_state: "tested",
+          outcome: "no_issue_observed",
+          evidence_state: arts > 0 ? "current" : "missing",
+        });
+      }
+    }
+    void camp;
+  }
+}
+
+function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCataloguedProviderStream>["stream"]; modelName: string; providerId: string; reserveTokens: number } | null {
+  const catalogPath = join(dataDir, "providers.json");
+  if (!existsSync(catalogPath)) return null;
+  try {
+    const catalog = new ProviderCatalog(dataDir);
+    const route = resolveSlot(catalog, "solver");
+    if (!route.model.available) return null;
+    const { stream } = createCataloguedProviderStream({
+      catalog,
+      providerId: route.provider.id,
+      modelName: route.model.name,
+      fetchFn: (url, init) => fetch(url, init),
+      maxRetries: 0,
+      timeoutMs: 60_000,
+    });
+    return {
+      stream,
+      modelName: route.model.name,
+      providerId: route.provider.id,
+      reserveTokens: route.model.max_output_tokens,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pendingImportant(storage: StorageService, campaignId: string): number {
+  const uncommitted = Number(
+    (storage.store.db.prepare("SELECT COUNT(*) AS c FROM decision_runs WHERE campaign_id = ? AND committed = 0").get(campaignId) as { c: number }).c,
+  );
+  const pendingFindings = Number(
+    (storage.store.db
+      .prepare("SELECT COUNT(*) AS c FROM findings WHERE campaign_id = ? AND status IN ('suspected','validating')")
+      .get(campaignId) as { c: number }).c,
+  );
+  return uncommitted + pendingFindings;
+}
+
+function rootGoalSatisfied(spec: CampaignSpec, storage: StorageService, campaignId: string, world: LabWorld): boolean {
+  if (spec.mode !== "goal_seeking") return false;
+  const ref = spec.root_goal.success_predicate_ref;
+  if (ref === "sample_recovered") return oracleGoalSatisfied(world);
+  const fact = storage.store.db
+    .prepare(
+      "SELECT id FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'accepted' AND validity = 'current' LIMIT 1",
+    )
+    .get(campaignId, ref);
+  return Boolean(fact);
 }
 
 export function restoreEngineData(backupDir: string, destDir: string): RestoreReport {

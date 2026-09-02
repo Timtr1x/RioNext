@@ -42,6 +42,8 @@ export interface IdempotentResult {
   extra?: Record<string, unknown>;
 }
 
+export const MAX_STEP_ATTEMPTS = 5;
+
 export class StorageService {
   constructor(
     readonly store: Store,
@@ -52,19 +54,88 @@ export class StorageService {
     this.store.close();
   }
 
-  acquireControllerLock(campaignId: string, owner: string): void {
-    this.store.transaction(() => {
-      const existing = this.store.db.prepare("SELECT owner FROM controller_locks WHERE campaign_id = ?").get(campaignId) as
-        | { owner: string }
+  acquireControllerLock(campaignId: string, owner: string, leaseMs = 60_000): { generation: number; takeover: boolean } {
+    return this.store.transaction(() => {
+      const now = Date.now();
+      const existing = this.store.db
+        .prepare("SELECT owner, lease_until, heartbeat_at, generation FROM controller_locks WHERE campaign_id = ?")
+        .get(campaignId) as
+        | { owner: string; lease_until: number | null; heartbeat_at: string | null; generation: number }
         | undefined;
-      if (existing && existing.owner !== owner) {
-        throw denied("controller_lock_held", "another controller owns this campaign", { owner: existing.owner });
-      }
+      const iso = nowIso();
+      const until = now + leaseMs;
       if (!existing) {
         this.store.db
-          .prepare("INSERT INTO controller_locks(campaign_id, owner, acquired_at) VALUES (?, ?, ?)")
-          .run(campaignId, owner, nowIso());
+          .prepare(
+            "INSERT INTO controller_locks(campaign_id, owner, acquired_at, heartbeat_at, lease_until, generation) VALUES (?, ?, ?, ?, ?, 1)",
+          )
+          .run(campaignId, owner, iso, iso, until);
+        return { generation: 1, takeover: false };
       }
+      if (existing.owner === owner) {
+        this.store.db
+          .prepare("UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ?")
+          .run(iso, until, campaignId);
+        return { generation: Number(existing.generation ?? 1), takeover: false };
+      }
+      const expired = existing.lease_until != null && Number(existing.lease_until) < now;
+      const heartbeatMs = existing.heartbeat_at ? Date.parse(existing.heartbeat_at) : 0;
+      const staleHeartbeat = heartbeatMs > 0 && now - heartbeatMs > leaseMs;
+      if (!expired && !staleHeartbeat) {
+        throw denied("controller_lock_held", "another controller owns this campaign", { owner: existing.owner });
+      }
+      const generation = Number(existing.generation ?? 1) + 1;
+      this.store.db
+        .prepare(
+          "UPDATE controller_locks SET owner = ?, acquired_at = ?, heartbeat_at = ?, lease_until = ?, generation = ? WHERE campaign_id = ?",
+        )
+        .run(owner, iso, iso, until, generation, campaignId);
+      return { generation, takeover: true };
+    });
+  }
+
+  heartbeatControllerLock(campaignId: string, owner: string, leaseMs = 60_000): void {
+    const iso = nowIso();
+    const until = Date.now() + leaseMs;
+    const row = this.store.db
+      .prepare("UPDATE controller_locks SET heartbeat_at = ?, lease_until = ? WHERE campaign_id = ? AND owner = ?")
+      .run(iso, until, campaignId, owner);
+    void row;
+  }
+
+  releaseControllerLock(campaignId: string, owner: string): void {
+    this.store.db.prepare("DELETE FROM controller_locks WHERE campaign_id = ? AND owner = ?").run(campaignId, owner);
+  }
+
+  releaseAllControllerLocks(owner: string): void {
+    this.store.db.prepare("DELETE FROM controller_locks WHERE owner = ?").run(owner);
+  }
+
+  recoverStaleRuns(campaignId: string): number {
+    return this.store.transaction(() => {
+      const now = Date.now();
+      const stale = this.store.db
+        .prepare(
+          "SELECT id, step_id, mode FROM task_runs WHERE campaign_id = ? AND state IN ('claimed','running') AND deadline_ms < ?",
+        )
+        .all(campaignId, now) as { id: string; step_id: string | null; mode: string }[];
+      const iso = nowIso();
+      for (const run of stale) {
+        this.store.db
+          .prepare("UPDATE task_runs SET state = 'lease_expired', end_reason = 'controller_takeover', updated_at = ? WHERE id = ?")
+          .run(iso, run.id);
+        if (run.mode === "decide") {
+          this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
+        } else {
+          this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
+          if (run.step_id) {
+            this.store.db
+              .prepare("UPDATE steps SET status = 'deferred', last_failure = 'controller_takeover', revision = revision + 1 WHERE id = ? AND status IN ('leased','running')")
+              .run(run.step_id);
+          }
+        }
+      }
+      return stale.length;
     });
   }
 
@@ -486,6 +557,7 @@ export class StorageService {
     conditions: Record<string, unknown>;
     env_rev: string;
     identity_ref?: string;
+    skip_progress?: boolean;
   }): IdempotentResult {
     return this.submit(args.campaign_id, args.producer_id, args.submission_id, args, () => {
       this.assertRun(args.campaign_id, args.run_id);
@@ -522,7 +594,7 @@ export class StorageService {
           args.env_rev,
           asJson(args.body),
         );
-      this.bumpProgress(args.campaign_id);
+      if (!args.skip_progress) this.bumpProgress(args.campaign_id);
       this.markRequested(args.campaign_id, seq);
       return { status: "ok", canonical_ids: { observation_id: id }, seq };
     });
@@ -603,7 +675,7 @@ export class StorageService {
           now,
           args.identity_ref ?? null,
         );
-      this.bumpProgress(args.campaign_id);
+      if (grade !== "derived") this.bumpProgress(args.campaign_id);
       this.markRequested(args.campaign_id, seq);
       this.recomputeStepReadiness(args.campaign_id);
       return {
@@ -823,31 +895,40 @@ export class StorageService {
       const readSetJson = asJson(args.read_set ?? []);
       const ops = parseProposalOps(args.operations);
       if (ops.length === 0) {
-        const seq = camp.event_head;
+        const seq = this.appendEvent(args.campaign_id, "decision.committed", { no_change: true }, { kind: "worker", id: args.run_id });
         this.store.db
           .prepare(
             "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, '[]', 1, ?, ?, ?)",
           )
-          .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, camp.requested_seq, args.no_change_reason ?? "no_change", nowIso());
+          .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, seq, args.no_change_reason ?? "no_change", nowIso());
         this.store.db
-          .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = empty_reviews + 1, updated_at = ? WHERE id = ?")
-          .run(nowIso(), args.campaign_id);
-        this.appendEvent(args.campaign_id, "decision.committed", { no_change: true }, { kind: "worker", id: args.run_id });
+          .prepare("UPDATE campaigns SET reviewed_seq = ?, empty_reviews = empty_reviews + 1, updated_at = ? WHERE id = ?")
+          .run(seq, nowIso(), args.campaign_id);
         return { status: "ok", canonical_ids: {}, seq, extra: { no_change: true } };
       }
       const ids: Record<string, string> = {};
       let seq = camp.event_head;
+      let material = false;
       for (const op of ops) {
         seq = this.applyOneOp(args.campaign_id, args.run_id, args.submission_id, op, ids);
+        if (op.op === "propose_step" || op.op === "retire_step" || op.op === "propose_subgoal" || op.op === "retire_subgoal") {
+          material = true;
+        }
       }
       this.store.db
         .prepare(
           "INSERT INTO decision_runs(id, campaign_id, run_id, read_set_json, operations_json, committed, reviewed_seq, reason, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, NULL, ?)",
         )
         .run(newId("dec"), args.campaign_id, args.run_id, readSetJson, asJson(ops), this.getCampaign(args.campaign_id).requested_seq, nowIso());
-      this.store.db
-        .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = 0, updated_at = ? WHERE id = ?")
-        .run(nowIso(), args.campaign_id);
+      if (material) {
+        this.store.db
+          .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, empty_reviews = 0, updated_at = ? WHERE id = ?")
+          .run(nowIso(), args.campaign_id);
+      } else {
+        this.store.db
+          .prepare("UPDATE campaigns SET reviewed_seq = requested_seq, updated_at = ? WHERE id = ?")
+          .run(nowIso(), args.campaign_id);
+      }
       this.appendEvent(args.campaign_id, "decision.committed", { ops: ops.map((o) => o.op) }, { kind: "worker", id: args.run_id });
       return { status: "ok", canonical_ids: ids, seq };
     });
@@ -892,8 +973,8 @@ export class StorageService {
       const now = nowIso();
       const attempt = step.attempt_count + 1;
       this.store.db
-        .prepare("UPDATE steps SET status = 'leased', attempt_count = ?, revision = revision + 1, updated_seq = updated_seq WHERE id = ?")
-        .run(attempt, step.id);
+        .prepare("UPDATE steps SET status = 'leased', attempt_count = ?, last_served_at = ?, revision = revision + 1, updated_seq = updated_seq WHERE id = ?")
+        .run(attempt, now, step.id);
       const runId = newId("run");
       const fence = fenceSeed + attempt;
       this.store.db
@@ -999,27 +1080,108 @@ export class StorageService {
     this.store.db.prepare("UPDATE task_runs SET context_manifest_json = ?, updated_at = ? WHERE id = ?").run(asJson(manifest), nowIso(), runId);
   }
 
+  saveCheckpoint(args: { campaign_id: string; run_id: string; note: string; next?: string; payload?: unknown }): { id: string } {
+    const id = newId("ckpt");
+    this.store.db
+      .prepare(
+        "INSERT INTO checkpoints(id, campaign_id, run_id, note, next, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(id, args.campaign_id, args.run_id, args.note, args.next ?? null, asJson(args.payload ?? {}), nowIso());
+    return { id };
+  }
+
+  latestCheckpoint(campaignId: string): Record<string, unknown> | null {
+    const row = this.store.db
+      .prepare("SELECT * FROM checkpoints WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(campaignId) as Record<string, unknown> | undefined;
+    return row ?? null;
+  }
+
+  listHints(campaignId: string, limit = 8): { seq: number; text: string }[] {
+    const rows = this.store.db
+      .prepare("SELECT seq, payload_json FROM events WHERE campaign_id = ? AND type = 'control.changed' ORDER BY seq DESC LIMIT 40")
+      .all(campaignId) as { seq: number; payload_json: string }[];
+    const hints: { seq: number; text: string }[] = [];
+    for (const row of rows) {
+      const payload = fromJson<Record<string, unknown>>(row.payload_json, {});
+      if (payload.command === "hint" && typeof payload.text === "string") {
+        hints.push({ seq: row.seq, text: payload.text });
+      }
+      if (hints.length >= limit) break;
+    }
+    return hints.reverse();
+  }
+
+  consumeReviewedEvents(campaignId: string): number {
+    const camp = this.getCampaign(campaignId);
+    const result = this.store.db
+      .prepare("UPDATE events SET consumed = 1 WHERE campaign_id = ? AND consumed = 0 AND seq <= ?")
+      .run(campaignId, camp.reviewed_seq);
+    return Number(result.changes ?? 0);
+  }
+
   recomputeStepReadiness(campaignId: string): void {
     const steps = this.store.db
-      .prepare("SELECT id, status, preconditions_json, reopen_rule_json FROM steps WHERE campaign_id = ? AND status IN ('proposed','blocked','deferred','ready')")
-      .all(campaignId) as { id: string; status: StepStatus; preconditions_json: string; reopen_rule_json: string }[];
+      .prepare("SELECT id, status, preconditions_json, reopen_rule_json, attempt_count FROM steps WHERE campaign_id = ? AND status IN ('proposed','blocked','deferred','ready')")
+      .all(campaignId) as {
+      id: string;
+      status: StepStatus;
+      preconditions_json: string;
+      reopen_rule_json: string;
+      attempt_count: number;
+    }[];
     const now = nowIso();
     for (const s of steps) {
       const pred = fromJson<PredicateExpr>(s.preconditions_json, { op: "all", of: [] });
       const value = this.preconditionValue(campaignId, pred);
-      if (value === "true" && (s.status === "blocked" || s.status === "proposed" || s.status === "deferred")) {
-        const from = s.status;
-        this.store.db
-          .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = COALESCE(ready_since, ?), revision = revision + 1 WHERE id = ?")
-          .run(now, s.id);
-        this.appendEvent(campaignId, "step.ready", { step_id: s.id, from }, { kind: "controller", id: "scheduler" }, s.id);
-      } else if (value !== "true" && s.status === "ready") {
+      const rule = fromJson<WakeCondition>(s.reopen_rule_json, { kind: "never" });
+      if (s.status === "ready" && value !== "true") {
         this.store.db
           .prepare("UPDATE steps SET status = 'blocked', blocked_reason = ?, revision = revision + 1 WHERE id = ?")
           .run(value === "unknown" ? "unknown_precondition" : "precondition_false", s.id);
         this.appendEvent(campaignId, "step.blocked", { step_id: s.id, reason: value }, { kind: "controller", id: "scheduler" }, s.id);
+        continue;
+      }
+      if (value !== "true") continue;
+      if (s.status === "blocked" || s.status === "proposed") {
+        this.store.db
+          .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = ?, revision = revision + 1 WHERE id = ?")
+          .run(now, s.id);
+        this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: s.status }, { kind: "controller", id: "scheduler" }, s.id);
+        continue;
+      }
+      if (s.status === "deferred" && this.reopenSatisfied(campaignId, rule, s.attempt_count)) {
+        this.store.db
+          .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = ?, revision = revision + 1 WHERE id = ?")
+          .run(now, s.id);
+        this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: "deferred" }, { kind: "controller", id: "scheduler" }, s.id);
       }
     }
+  }
+
+  private reopenSatisfied(campaignId: string, rule: WakeCondition, attemptCount: number): boolean {
+    if (attemptCount >= MAX_STEP_ATTEMPTS) return false;
+    if (rule.kind === "never") return false;
+    if (rule.kind === "always") return true;
+    if (rule.kind === "env_revision") {
+      const camp = this.getCampaign(campaignId);
+      const world = this.getWorld<{ env_rev?: string }>(campaignId, { env_rev: camp.spec.environment_revision });
+      const latest = this.store.db
+        .prepare("SELECT env_rev FROM observations WHERE campaign_id = ? ORDER BY created_seq DESC LIMIT 1")
+        .get(campaignId) as { env_rev: string } | undefined;
+      const current = String(latest?.env_rev ?? world.env_rev ?? camp.spec.environment_revision);
+      return Boolean(rule.env_revision) && current === rule.env_revision;
+    }
+    if (rule.kind === "fact_key" && rule.key) {
+      return this.preconditionValue(campaignId, { op: "atom", key: rule.key }) === "true";
+    }
+    if (rule.kind === "observation_subject" && rule.subject) {
+      const row = this.store.db
+        .prepare("SELECT id FROM observations WHERE campaign_id = ? AND subject = ? LIMIT 1")
+        .get(campaignId, rule.subject);
+      return Boolean(row);
+    }
+    return false;
   }
 
   graphQuery(campaignId: string, args: { entity: string; limit?: number; offset?: number; q?: string; depth?: number }): {
@@ -1036,20 +1198,20 @@ export class StorageService {
       case "facts":
         rows = this.store.db
           .prepare(
-            "SELECT id, proposition, fact_key, epistemic_status, source_grade, validity, support_refs_json, counter_refs_json, conditions_json FROM facts WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
+            "SELECT id, revision, proposition, fact_key, epistemic_status, source_grade, validity, support_refs_json, counter_refs_json, conditions_json FROM facts WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
           )
           .all(campaignId, limit + 1, offset);
         break;
       case "steps":
         rows = this.store.db
           .prepare(
-            "SELECT id, kind, question, status, priority, blocked_reason, last_failure, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
+            "SELECT id, revision, kind, question, status, priority, blocked_reason, last_failure, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
           )
           .all(campaignId, limit + 1, offset);
         break;
       case "goals":
         rows = this.store.db
-          .prepare("SELECT id, statement, is_root, status, parent_id FROM goals WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?")
+          .prepare("SELECT id, revision, statement, is_root, status, parent_id FROM goals WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?")
           .all(campaignId, limit + 1, offset);
         break;
       case "findings":
@@ -1093,7 +1255,12 @@ export class StorageService {
   }
 
   unconsumedCount(campaignId: string): number {
-    const row = this.store.db.prepare("SELECT COUNT(*) AS c FROM events WHERE campaign_id = ? AND consumed = 0").get(campaignId) as {
+    const row = this.store.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM events WHERE campaign_id = ? AND consumed = 0
+         AND type IN ('observation.recorded','fact.accepted','finding.proposed','control.changed','step.ready','coverage.updated')`,
+      )
+      .get(campaignId) as {
       c: number;
     };
     return Number(row.c);

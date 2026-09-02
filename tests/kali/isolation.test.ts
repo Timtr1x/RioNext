@@ -71,7 +71,7 @@ test("K11 container env does not copy host secrets", () => {
   delete process.env.OPENAI_API_KEY;
   const blob = JSON.stringify(spec);
   assert.equal(blob.includes("sk-should-never-enter-kali"), false);
-  assert.ok(spec.argv.includes("NET_ADMIN"));
+  assert.equal(spec.argv.includes("NET_ADMIN"), false);
 });
 
 test("K06 host and redirect not in allowlist are denied", () => {

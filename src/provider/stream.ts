@@ -7,8 +7,9 @@ import {
 } from "../runtime/pi/scripted-stream.ts";
 import type { ProviderCatalog } from "./catalog.ts";
 import { postJson, type FetchFn } from "./client.ts";
-import { buildProtocolBody, extractText, extractUsage } from "./transform.ts";
+import { buildProtocolBody, extractText, extractToolCalls, extractUsage, type CommonTool, type ProtocolMessage } from "./transform.ts";
 import { OUTPUT_DEFAULT } from "./types.ts";
+import { createToolStream } from "../runtime/pi/scripted-stream.ts";
 
 export interface CataloguedStreamStats {
   attempts: number;
@@ -45,6 +46,49 @@ function userText(context: Context): string {
   return "";
 }
 
+function contextTools(context: Context): CommonTool[] {
+  return (context.tools ?? []).map((t) => ({
+    name: t.name,
+    description: ("description" in t && typeof t.description === "string" ? t.description : t.name) as string,
+    parameters: (t.parameters && typeof t.parameters === "object" ? (t.parameters as Record<string, unknown>) : { type: "object", properties: {} }),
+  }));
+}
+
+function contextMessages(context: Context): ProtocolMessage[] {
+  const out: ProtocolMessage[] = [];
+  for (const m of context.messages) {
+    if (m.role === "user") {
+      const content =
+        typeof m.content === "string"
+          ? m.content
+          : Array.isArray(m.content)
+            ? m.content.map((c) => ("text" in c && typeof c.text === "string" ? c.text : "")).join("")
+            : "";
+      out.push({ role: "user", content });
+      continue;
+    }
+    if (m.role === "assistant") {
+      const calls = (Array.isArray(m.content) ? m.content : [])
+        .filter((c) => c && typeof c === "object" && (c as { type?: string }).type === "toolCall")
+        .map((c) => {
+          const call = c as { id?: string; name?: string; arguments?: unknown };
+          return { id: String(call.id ?? ""), name: String(call.name ?? ""), arguments: call.arguments ?? {} };
+        })
+        .filter((c) => c.name);
+      const text = (Array.isArray(m.content) ? m.content : [])
+        .map((c) => ("text" in c && typeof c.text === "string" ? c.text : ""))
+        .join("");
+      out.push({ role: "assistant", content: text || null, tool_calls: calls.length ? calls : undefined });
+      continue;
+    }
+    if (m.role === "toolResult") {
+      const text = (m.content ?? []).map((c) => ("text" in c && typeof c.text === "string" ? c.text : "")).join("");
+      out.push({ role: "tool", content: text, tool_call_id: m.toolCallId, name: m.toolName });
+    }
+  }
+  return out;
+}
+
 export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
   stream: StreamFn;
   stats: CataloguedStreamStats;
@@ -62,6 +106,8 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         model: opts.modelName,
         system: context.systemPrompt,
         user: userText(context),
+        messages: contextMessages(context),
+        tools: contextTools(context),
         max_tokens: campaignMaxTokens(opts, options?.maxTokens),
       });
       const cap = Math.min(maxRetries, options?.maxRetries ?? maxRetries);
@@ -82,8 +128,12 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
             signal: options?.signal,
           });
           if (res.ok) {
-            const text = extractText(provider.protocol, res.json);
             const usage = extractUsage(res.json);
+            const calls = extractToolCalls(provider.protocol, res.json);
+            if (calls.length) {
+              return createToolStream(model, calls, "toolUse");
+            }
+            const text = extractText(provider.protocol, res.json);
             return createTextStream(model, text || "ok", usage);
           }
           lastErr = `http_${res.status}`;

@@ -110,7 +110,6 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
   const network = opts.network === "none" ? "none" : "bridge";
   argv.push("--network", network);
   if (opts.network === "allowlist") {
-    argv.push("--cap-add", "NET_ADMIN");
     const ips = collectAllowIps(opts.allowAssets, opts.resolve ?? defaultResolve);
     env.RIONEXT_ALLOW_IPS = ips.join(",");
   }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { validateCampaignSpec } from "../domain/spec.ts";
 import { invalidInput } from "../domain/errors.ts";
 import type { CampaignSpec } from "../domain/types.ts";
@@ -41,7 +42,7 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   automatic_extension_loading: false,
 };
 
-export function makeRuntimeConfig(dataDir: string, instanceId = "local-1"): RuntimeConfig {
+export function makeRuntimeConfig(dataDir: string, instanceId = `proc-${randomUUID()}`): RuntimeConfig {
   return {
     ...DEFAULT_RUNTIME,
     data_dir: dataDir,

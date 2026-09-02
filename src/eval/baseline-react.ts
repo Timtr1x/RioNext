@@ -23,7 +23,7 @@ export async function runReactBaseline(specInput: unknown, _dataDir: string): Pr
       const r = inspectWorld(world, (params as { target: string }).target);
       world = r.world;
       invocations.push(`world_inspect:${(params as { target: string }).target}`);
-      return { content: [{ type: "text", text: r.observation }], details: r };
+      return { content: [{ type: "text", text: r.observation }], details: { observation: r.observation, subject: r.subject } };
     },
   };
   const act: AgentTool = {
@@ -38,7 +38,7 @@ export async function runReactBaseline(specInput: unknown, _dataDir: string): Pr
       const r = actWorld(world, p.action, p.arg);
       world = r.world;
       invocations.push(`world_act:${p.action}`);
-      return { content: [{ type: "text", text: r.observation }], details: r };
+      return { content: [{ type: "text", text: r.observation }], details: { observation: r.observation, subject: r.subject } };
     },
   };
   const agent = new Agent({
@@ -56,6 +56,9 @@ export async function runReactBaseline(specInput: unknown, _dataDir: string): Pr
   return {
     baseline: "B0-react",
     tool_invocations: invocations,
+    model_sends: calls,
+    tool_sends: calls,
+    env_sends: calls,
     model_turns_capped_by: maxCalls,
     calls,
     recovered: world.cabinet_open,

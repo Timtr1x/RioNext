@@ -80,6 +80,7 @@ export class ModelGateway {
     private readonly lease: RunLease,
     private readonly modelId: string,
     private readonly providerName = "scripted",
+    private readonly reserveTokens = 16,
   ) {}
 
   closeAdmission(): void {
@@ -97,7 +98,13 @@ export class ModelGateway {
     if (!this.storage.admissionOpen(this.lease.campaign_id) && this.lease.mode === "execute") {
       return errorStream(model, "admission closed");
     }
-    if (!this.budget.canAdmit(this.lease.campaign_id, 1, 16, 0)) {
+    const deadlineDeny = admissionDeadline(this.storage, this.lease);
+    if (deadlineDeny) {
+      this.lastError = deadlineDeny;
+      return errorStream(model, deadlineDeny);
+    }
+    const reserveTokens = Math.max(1, this.reserveTokens);
+    if (!this.budget.canAdmit(this.lease.campaign_id, 1, reserveTokens, 0)) {
       this.lastError = "budget_exhausted";
       return errorStream(model, "budget_exhausted");
     }
@@ -112,30 +119,39 @@ export class ModelGateway {
       requested_model: this.modelId,
       provider: this.providerName,
       reserved_calls: 1,
-      reserved_tokens: 16,
+      reserved_tokens: reserveTokens,
     });
-    this.budget.reserve(this.lease.campaign_id, inv.id, 1, 16, 0);
+    this.budget.reserve(this.lease.campaign_id, inv.id, 1, reserveTokens, 0);
     this.invocations.mark(inv.id, "dispatching");
     this.invocations.mark(inv.id, "running");
     this.modelSends += 1;
     try {
       const stream = this.inner(model, context, options);
       return wrapSettle(stream, (msg) => {
-        const tokens = Number(msg.usage?.totalTokens ?? 16);
+        const tokens = Number(msg.usage?.totalTokens ?? reserveTokens);
         const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
         this.invocations.mark(inv.id, failed ? "failed_known" : "completed", {
           actual_tokens: tokens,
           error: msg.errorMessage ?? undefined,
           status: msg.stopReason,
         });
-        this.budget.settle(this.lease.campaign_id, inv.id, 1, tokens, 0, 1, tokens, 0);
+        this.budget.settle(
+          this.lease.campaign_id,
+          inv.id,
+          1,
+          tokens,
+          0,
+          inv.reserved_calls,
+          inv.reserved_tokens,
+          inv.reserved_cost,
+        );
       }, (err) => {
         this.invocations.mark(inv.id, "failed_known", { error: String(err) });
-        this.budget.settle(this.lease.campaign_id, inv.id, 1, 16, 0, 1, 16, 0);
+        this.budget.settle(this.lease.campaign_id, inv.id, 1, 0, 0, inv.reserved_calls, inv.reserved_tokens, inv.reserved_cost);
       });
     } catch (err) {
       this.invocations.mark(inv.id, "failed_known", { error: String(err) });
-      this.budget.settle(this.lease.campaign_id, inv.id, 1, 16, 0, 1, 16, 0);
+      this.budget.settle(this.lease.campaign_id, inv.id, 1, 0, 0, inv.reserved_calls, inv.reserved_tokens, inv.reserved_cost);
       return errorStream(model, err instanceof Error ? err.message : String(err));
     }
   };
@@ -170,6 +186,14 @@ export class ToolGateway {
     const run = this.storage.getRun(this.lease.run_id);
     if (Number(run.fence) !== this.lease.fence) {
       return { invocation_id: "none", blocked: true, reason: "stale_fence", allowed: false };
+    }
+    const deadlineDeny = admissionDeadline(this.storage, this.lease);
+    if (deadlineDeny) {
+      return { invocation_id: "none", blocked: true, reason: deadlineDeny, allowed: false };
+    }
+    const allow = this.storage.getCampaign(this.lease.campaign_id).spec.tool_allowlist;
+    if (allow.length > 0 && !allow.includes(req.name)) {
+      return { invocation_id: "none", blocked: true, reason: "tool_not_allowlisted", allowed: false };
     }
     if (req.envTool && !this.storage.envAdmissionOpen(this.lease.run_id)) {
       this.blockedAfterFinish += 1;
@@ -237,6 +261,13 @@ export class ToolGateway {
     ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}));
     return { invocation_id: inv.id, blocked: false, allowed: true };
   }
+}
+
+function admissionDeadline(storage: StorageService, lease: RunLease): string | null {
+  if (Date.now() > lease.deadline_ms) return "lease_expired";
+  const camp = storage.getCampaign(lease.campaign_id);
+  if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return "campaign_deadline";
+  return null;
 }
 
 function errorStream(model: Model<string>, message: string): AssistantMessageEventStream {

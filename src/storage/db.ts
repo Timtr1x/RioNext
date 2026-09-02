@@ -34,8 +34,32 @@ export class Store {
       | { version: number }
       | undefined;
     if (!row) {
-      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(1, nowIso());
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(2, nowIso());
+      return;
     }
+    if (row.version < 2) {
+      this.addColumn("controller_locks", "heartbeat_at", "TEXT");
+      this.addColumn("controller_locks", "lease_until", "INTEGER");
+      this.addColumn("controller_locks", "generation", "INTEGER NOT NULL DEFAULT 1");
+      this.addColumn("steps", "last_served_at", "TEXT");
+      this.db.exec(`CREATE TABLE IF NOT EXISTS checkpoints (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        run_id TEXT,
+        note TEXT NOT NULL,
+        next TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+      )`);
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(2, nowIso());
+    }
+  }
+
+  private addColumn(table: string, name: string, decl: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (cols.some((c) => c.name === name)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
   }
 
   schemaVersion(): number {

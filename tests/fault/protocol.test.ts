@@ -72,7 +72,7 @@ function oneStepDecide(question: string): TurnChooser {
                     inputRefs: [],
                     resourceClaims: [],
                     budgetHint: {},
-                    reopenRule: { kind: "never" },
+                    reopenRule: { kind: "always" },
                   },
                 },
               ],

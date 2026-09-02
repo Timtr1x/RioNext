@@ -100,6 +100,18 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
     return { canClose: false, suggestedState: "plateau", blockers };
   }
 
+  const mandatoryBadEvidence = snap.coverage.filter(
+    (c) =>
+      c.mandatory &&
+      c.applicability === "applicable" &&
+      c.execution_state === "tested" &&
+      (c.evidence_state === "stale" || c.evidence_state === "missing"),
+  );
+  if (mandatoryBadEvidence.length > 0) {
+    blockers.push("coverage_evidence_not_current");
+    return { canClose: false, suggestedState: "plateau", blockers };
+  }
+
   const pendingFindings = snap.findings.filter((f) => f.status === "suspected" || f.status === "validating");
   if (pendingFindings.length > 0) {
     blockers.push("findings_pending_verification");

@@ -152,7 +152,7 @@ export class BudgetLedger {
       reserved: number;
     };
     let nextFree = Number(row.free);
-    let nextReserved = Number(row.reserved) - reserved;
+    let nextReserved = Math.max(0, Number(row.reserved) - reserved);
     let extra = 0;
     if (actual <= reserved) {
       nextFree += reserved - actual;

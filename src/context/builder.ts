@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ContextPack } from "../contracts/worker-runtime.ts";
 import { hashJson } from "../domain/fingerprint.ts";
-import type { ContextManifest, RunLease } from "../domain/types.ts";
+import type { ContextManifest, ReadSetEntry, RunLease } from "../domain/types.ts";
 import type { StorageService } from "../storage/service.ts";
 import { isKaliProfile } from "../tools/kali-profile.ts";
 import { PROMPT_VERSION } from "../version.ts";
@@ -37,6 +37,8 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const findings = storage.graphQuery(lease.campaign_id, { entity: "findings", limit: 20 });
   const coverage = storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 });
   const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20 });
+  const hints = storage.listHints(lease.campaign_id);
+  const checkpoint = storage.latestCheckpoint(lease.campaign_id);
   const payload: Record<string, unknown> = {
     campaign_id: lease.campaign_id,
     mode: lease.mode,
@@ -52,6 +54,8 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
       calls: storage.store.db.prepare("SELECT free_calls FROM budget_accounts WHERE campaign_id = ?").get(lease.campaign_id),
     },
     graph: { facts: facts.items, steps: steps.items, goals: goals.items, findings: findings.items, coverage: coverage.items, observations: observations.items },
+    hints,
+    checkpoint,
     omitted: [facts, steps, goals, findings, coverage, observations].filter((g) => g.truncated).map((g) => ({ truncated: true })),
     ...extra,
   };
@@ -73,14 +77,14 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
     scope_version: camp.spec.scope_version,
     policy_version: camp.spec.policy_version,
     model_id: camp.spec.model_policy.model,
-    selected_entity_revisions: [],
+    selected_entity_revisions: entityRevisions(facts.items, steps.items, goals.items),
     artifact_slices: [],
     omitted_items: payload.omitted as ContextManifest["omitted_items"],
     estimated_tokens: Math.ceil(encoded.length / 4),
     context_hash: createHash("sha256").update(encoded).digest("hex"),
   };
   storage.saveManifest(lease.run_id, manifest);
-  const tool_names =
+  const baseNames =
     lease.mode === "decide"
       ? ["graph_query", "artifact_read", "propose_plan", "checkpoint", "finish_decision"]
       : isKaliProfile(camp.spec.execution_profile)
@@ -109,10 +113,27 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
             "world_inspect",
             "world_act",
           ];
+  const allow = camp.spec.tool_allowlist;
+  const tool_names = allow.length ? baseNames.filter((n) => allow.includes(n)) : baseNames;
   return {
     manifest,
     system_prompt: loadPrompt(lease.mode),
     user_payload: payload,
     tool_names,
   };
+}
+
+function entityRevisions(facts: unknown[], steps: unknown[], goals: unknown[]): ReadSetEntry[] {
+  const out: ReadSetEntry[] = [];
+  const take = (table: string, rows: unknown[]) => {
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as { id?: unknown; revision?: unknown };
+      if (typeof r.id === "string") out.push({ table, id: r.id, revision: Number(r.revision ?? 1) });
+    }
+  };
+  take("facts", facts);
+  take("steps", steps);
+  take("goals", goals);
+  return out;
 }

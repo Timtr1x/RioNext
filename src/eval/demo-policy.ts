@@ -75,7 +75,7 @@ export function decideChooser(): TurnChooser {
             inputRefs: [],
             resourceClaims: [],
             budgetHint: {},
-            reopenRule: { kind: "never" },
+            reopenRule: { kind: "always" },
           },
         });
       }

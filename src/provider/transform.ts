@@ -6,10 +6,19 @@ export interface CommonTool {
   parameters: Record<string, unknown>;
 }
 
+export interface ProtocolMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: unknown;
+  tool_calls?: { id: string; name: string; arguments: unknown }[];
+  tool_call_id?: string;
+  name?: string;
+}
+
 export interface CommonRequest {
   model: string;
   system?: string;
   user: string | Array<Record<string, unknown>>;
+  messages?: ProtocolMessage[];
   max_tokens: number;
   tools?: CommonTool[];
   thinking?: "off" | "on" | "adaptive" | "enabled";
@@ -23,11 +32,10 @@ export function buildProtocolBody(protocol: Protocol, req: CommonRequest): Recor
 }
 
 function anthropicBody(req: CommonRequest): Record<string, unknown> {
-  const content = userToAnthropicContent(req);
   const body: Record<string, unknown> = {
     model: req.model,
     max_tokens: req.max_tokens,
-    messages: [{ role: "user", content }],
+    messages: req.messages?.length ? toAnthropicMessages(req) : [{ role: "user", content: userToAnthropicContent(req) }],
   };
   if (req.system) body.system = req.system;
   if (req.tools?.length) {
@@ -46,9 +54,11 @@ function anthropicBody(req: CommonRequest): Record<string, unknown> {
 }
 
 function chatCompletionsBody(req: CommonRequest): Record<string, unknown> {
-  const messages: Record<string, unknown>[] = [];
-  if (req.system) messages.push({ role: "system", content: req.system });
-  messages.push({ role: "user", content: userToOpenAIContent(req) });
+  const messages: Record<string, unknown>[] = req.messages?.length ? toOpenAIMessages(req) : [];
+  if (!req.messages?.length) {
+    if (req.system) messages.push({ role: "system", content: req.system });
+    messages.push({ role: "user", content: userToOpenAIContent(req) });
+  }
   const body: Record<string, unknown> = {
     model: req.model,
     messages,
@@ -65,6 +75,54 @@ function chatCompletionsBody(req: CommonRequest): Record<string, unknown> {
     body.reasoning_effort = "medium";
   }
   return body;
+}
+
+function toOpenAIMessages(req: CommonRequest): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  if (req.system) out.push({ role: "system", content: req.system });
+  for (const m of req.messages ?? []) {
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      out.push({
+        role: "assistant",
+        content: m.content ?? null,
+        tool_calls: m.tool_calls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: typeof c.arguments === "string" ? c.arguments : JSON.stringify(c.arguments ?? {}) },
+        })),
+      });
+      continue;
+    }
+    if (m.role === "tool") {
+      out.push({ role: "tool", tool_call_id: m.tool_call_id, content: m.content ?? "" });
+      continue;
+    }
+    out.push({ role: m.role, content: m.content });
+  }
+  return out;
+}
+
+function toAnthropicMessages(req: CommonRequest): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const m of req.messages ?? []) {
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      out.push({
+        role: "assistant",
+        content: m.tool_calls.map((c) => ({ type: "tool_use", id: c.id, name: c.name, input: c.arguments ?? {} })),
+      });
+      continue;
+    }
+    if (m.role === "tool") {
+      out.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: m.tool_call_id, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "") }],
+      });
+      continue;
+    }
+    if (m.role === "system") continue;
+    out.push({ role: m.role === "assistant" ? "assistant" : "user", content: m.content });
+  }
+  return out;
 }
 
 function responsesBody(req: CommonRequest): Record<string, unknown> {
@@ -181,14 +239,70 @@ export function extractUsage(json: unknown): { input: number; output: number; to
 }
 
 export function extractToolCall(protocol: Protocol, json: unknown): boolean {
-  if (!json || typeof json !== "object") return false;
+  return extractToolCalls(protocol, json).length > 0;
+}
+
+export function extractToolCalls(protocol: Protocol, json: unknown): { id: string; name: string; arguments: Record<string, unknown> }[] {
+  if (!json || typeof json !== "object") return [];
   const obj = json as Record<string, unknown>;
   if (protocol === "ANTHROPIC_MESSAGES") {
     const content = obj.content;
-    if (Array.isArray(content)) return content.some((b) => b && (b as { type?: string }).type === "tool_use");
+    if (!Array.isArray(content)) return [];
+    return content
+      .filter((b) => b && typeof b === "object" && (b as { type?: string }).type === "tool_use")
+      .map((b, i) => {
+        const block = b as { id?: string; name?: string; input?: unknown };
+        return {
+          id: String(block.id ?? `tool_${i}`),
+          name: String(block.name ?? ""),
+          arguments: (block.input && typeof block.input === "object" ? block.input : {}) as Record<string, unknown>,
+        };
+      })
+      .filter((c) => c.name);
   }
-  const blob = JSON.stringify(obj);
-  return blob.includes("tool_calls") || blob.includes("function_call") || blob.includes("tool_use");
+  if (protocol === "OPENAI_RESPONSES") {
+    const output = obj.output;
+    if (!Array.isArray(output)) return [];
+    return output
+      .filter((b) => b && typeof b === "object" && ((b as { type?: string }).type === "function_call" || (b as { type?: string }).type === "tool_call"))
+      .map((b, i) => {
+        const block = b as { call_id?: string; id?: string; name?: string; arguments?: unknown };
+        let args: Record<string, unknown> = {};
+        if (typeof block.arguments === "string") {
+          try {
+            args = JSON.parse(block.arguments) as Record<string, unknown>;
+          } catch {
+            args = { raw: block.arguments };
+          }
+        } else if (block.arguments && typeof block.arguments === "object") {
+          args = block.arguments as Record<string, unknown>;
+        }
+        return { id: String(block.call_id ?? block.id ?? `tool_${i}`), name: String(block.name ?? ""), arguments: args };
+      })
+      .filter((c) => c.name);
+  }
+  const choices = obj.choices;
+  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") return [];
+  const msg = (choices[0] as { message?: { tool_calls?: unknown } }).message;
+  const calls = msg?.tool_calls;
+  if (!Array.isArray(calls)) return [];
+  return calls
+    .map((c, i) => {
+      const call = c as { id?: string; function?: { name?: string; arguments?: unknown }; name?: string };
+      const raw = call.function?.arguments ?? "{}";
+      let args: Record<string, unknown> = {};
+      if (typeof raw === "string") {
+        try {
+          args = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          args = { raw };
+        }
+      } else if (raw && typeof raw === "object") {
+        args = raw as Record<string, unknown>;
+      }
+      return { id: String(call.id ?? `tool_${i}`), name: String(call.function?.name ?? call.name ?? ""), arguments: args };
+    })
+    .filter((c) => c.name);
 }
 
 export const ECHO_TOOL: CommonTool = {

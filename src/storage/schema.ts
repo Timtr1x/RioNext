@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS controller_locks (
   campaign_id TEXT PRIMARY KEY,
   owner TEXT NOT NULL,
   acquired_at TEXT NOT NULL,
+  heartbeat_at TEXT,
+  lease_until INTEGER,
+  generation INTEGER NOT NULL DEFAULT 1,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 
@@ -132,6 +135,7 @@ CREATE TABLE IF NOT EXISTS steps (
   blocked_reason TEXT,
   last_failure TEXT,
   merged_into TEXT,
+  last_served_at TEXT,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 
@@ -298,6 +302,17 @@ CREATE TABLE IF NOT EXISTS decision_runs (
   committed INTEGER NOT NULL,
   reviewed_seq INTEGER,
   reason TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  run_id TEXT,
+  note TEXT NOT NULL,
+  next TEXT,
+  payload_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );

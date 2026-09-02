@@ -21,7 +21,8 @@ export type IdPrefix =
   | "op"
   | "br"
   | "prv"
-  | "mdl";
+  | "mdl"
+  | "ckpt";
 
 export function newId(prefix: IdPrefix): string {
   return `${prefix}_${randomUUID()}`;

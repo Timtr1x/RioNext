@@ -331,7 +331,7 @@ export interface ContextManifest {
   scope_version: string;
   policy_version: string;
   model_id: string;
-  selected_entity_revisions: EntityRef[];
+  selected_entity_revisions: ReadSetEntry[];
   artifact_slices: { artifact_id: string; offset: number; length: number }[];
   omitted_items: { kind: string; count: number }[];
   estimated_tokens: number;

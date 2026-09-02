@@ -19,6 +19,7 @@ export interface FactoryDeps {
   chooseExecute: TurnChooser;
   getMaxTurns: () => { decide: number; execute: number };
   kali?: KaliRuntime;
+  liveStream?: PiStreamFn;
 }
 
 export class PiWorkerFactory implements WorkerFactory {
@@ -64,7 +65,7 @@ export class PiWorker implements WorkerRuntime {
     this.abortCtrl = new AbortController();
     signal.addEventListener("abort", () => this.abort());
     const chooser = this.mode === "decide" ? this.deps.chooseDecide : this.deps.chooseExecute;
-    const inner = createScriptedStreamFn(chooser);
+    const inner = this.deps.liveStream ?? createScriptedStreamFn(chooser);
     this.modelGateway = this.deps.modelGatewayFor(lease, inner);
     this.toolGateway = this.deps.toolGatewayFor(lease);
     const tools = this.buildTools(lease, context);
@@ -103,7 +104,26 @@ export class PiWorker implements WorkerRuntime {
         const text = (result.content ?? [])
           .map((c) => ("text" in c && typeof c.text === "string" ? c.text : ""))
           .join("");
-        ingestToolOutputAsData(this.deps.storage, lease.campaign_id, lease.run_id, text + JSON.stringify(result.details ?? {}));
+        const raw = text + JSON.stringify(result.details ?? {});
+        ingestToolOutputAsData(this.deps.storage, lease.campaign_id, lease.run_id, raw);
+        const art = await this.deps.storage.putArtifact(lease.campaign_id, raw.slice(0, 200_000), "application/json", lease.run_id);
+        if (isEnvTool(toolCall.name)) {
+          this.deps.storage.recordObservation({
+            campaign_id: lease.campaign_id,
+            producer_id: lease.run_id,
+            submission_id: newId("sub"),
+            run_id: lease.run_id,
+            attempt_id: lease.run_id,
+            subject: `tool_raw:${toolCall.name}`,
+            body: { name: toolCall.name, arguments: toolCall.arguments, preview: text.slice(0, 8000) },
+            artifact_refs: [art.id],
+            conditions: {},
+            env_rev: String(
+              (this.deps.storage.getWorld<LabWorld>(lease.campaign_id, { env_rev: "env-1" } as LabWorld) as LabWorld).env_rev ?? "env-1",
+            ),
+            skip_progress: true,
+          });
+        }
         if (toolCall.name === "finish_step" || toolCall.name === "finish_decision") {
           finishRequested = true;
           return { terminate: true, details: result.details };
@@ -201,7 +221,17 @@ export class PiWorker implements WorkerRuntime {
       tool("checkpoint", "Save checkpoint", Type.Object({
         note: Type.String(),
         next: Type.Optional(Type.String()),
-      }), async (_id, params) => ok({ saved: true, ...(params as object) })),
+      }), async (_id, params) => {
+        const p = params as { note: string; next?: string };
+        const saved = s.saveCheckpoint({
+          campaign_id: lease.campaign_id,
+          run_id: lease.run_id,
+          note: p.note,
+          next: p.next,
+          payload: { mode: this.mode, step_id: lease.step_id },
+        });
+        return ok({ saved: true, checkpoint_id: saved.id, note: p.note, next: p.next ?? null });
+      }),
     ];
     if (this.mode === "decide") {
       tools.push(
@@ -217,6 +247,7 @@ export class PiWorker implements WorkerRuntime {
             run_id: lease.run_id,
             operations: p.operations,
             no_change_reason: p.no_change_reason,
+            read_set: context.manifest.selected_entity_revisions,
           });
           return ok(result);
         }),
@@ -340,7 +371,7 @@ export class PiWorker implements WorkerRuntime {
           const world = s.getWorld<LabWorld>(lease.campaign_id, { env_rev: "env-1" } as LabWorld);
           const result = inspectWorld(world, (params as { target: string }).target);
           s.saveWorld(lease.campaign_id, result.world);
-          return ok(result);
+          return ok({ observation: result.observation, subject: result.subject });
         }),
         tool("world_act", "Act in synthetic world", Type.Object({
           action: Type.String(),
@@ -350,7 +381,7 @@ export class PiWorker implements WorkerRuntime {
           const p = params as { action: string; arg?: string };
           const result = actWorld(world, p.action, p.arg);
           s.saveWorld(lease.campaign_id, result.world);
-          return ok(result);
+          return ok({ observation: result.observation, subject: result.subject, transient: result.transient ?? false });
         }),
         tool("kali_run", "Run an allowlisted Kali binary in the campaign container. nmap/nuclei/katana and other scanners return immediately with execution_id and keep running in the container (up to 60 min). Do not poll; finish_step. bash/sh/python3 run /workspace scripts or bash -c.", Type.Object({
           kind: Type.Literal("kali"),
