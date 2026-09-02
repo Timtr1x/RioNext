@@ -80,7 +80,7 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
   } else if (!provider.startsWith("prv_")) {
     throw invalidInput("unknown_model", `unknown provider ${provider}`);
   }
-  const thinking_level = optionalString(model_policy_raw, "thinking_level") ?? "off";
+  const thinking_level = optionalString(model_policy_raw, "thinking_level") ?? "high";
   if (!["off", "minimal", "low", "medium", "high"].includes(thinking_level)) {
     throw invalidInput("unknown_thinking_level", `unknown thinking_level ${thinking_level}`);
   }

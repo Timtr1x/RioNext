@@ -22,7 +22,7 @@
   "model_policy": {
     "provider": "scripted",
     "model": "scripted",
-    "thinking_level": "off",
+    "thinking_level": "high",
     "allow_retry": false,
     "allow_model_fallback": false
   },

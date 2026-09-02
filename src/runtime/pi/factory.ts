@@ -73,11 +73,12 @@ export class PiWorker implements WorkerRuntime {
     const maxTurns = this.mode === "decide" ? caps.decide : caps.execute;
     let turns = 0;
     let finishRequested = false;
+    const thinkingLevel = this.deps.storage.getCampaign(lease.campaign_id).spec.model_policy.thinking_level;
     const agent = new Agent({
       initialState: {
         systemPrompt: context.system_prompt,
         model: SCRIPTED_MODEL,
-        thinkingLevel: "off",
+        thinkingLevel,
         tools,
       },
       streamFn: this.modelGateway.stream,

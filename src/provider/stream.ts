@@ -25,6 +25,11 @@ export interface CataloguedStreamOpts {
   apiKey?: string;
 }
 
+function streamThinkingLevel(reasoning: unknown): "off" | "minimal" | "low" | "medium" | "high" {
+  if (reasoning === "minimal" || reasoning === "low" || reasoning === "medium" || reasoning === "high") return reasoning;
+  return "off";
+}
+
 function campaignMaxTokens(opts: CataloguedStreamOpts, requested?: number): number {
   if (typeof requested === "number" && requested > 0) return requested;
   const rec = opts.catalog.listModels(opts.providerId).find((m) => m.name === opts.modelName);
@@ -102,6 +107,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
       }
       const provider = opts.catalog.getProvider(opts.providerId);
       const key = opts.apiKey ?? opts.catalog.apiKey(opts.providerId) ?? "catalogued-no-live-key";
+      const thinking_level = streamThinkingLevel(options?.reasoning);
       const body = buildProtocolBody(provider.protocol, {
         model: opts.modelName,
         system: context.systemPrompt,
@@ -109,6 +115,8 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         messages: contextMessages(context),
         tools: contextTools(context),
         max_tokens: campaignMaxTokens(opts, options?.maxTokens),
+        thinking: thinking_level === "off" ? "off" : "on",
+        thinking_level,
       });
       const cap = Math.min(maxRetries, options?.maxRetries ?? maxRetries);
       let lastErr = "provider_error";

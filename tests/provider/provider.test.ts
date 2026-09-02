@@ -109,6 +109,16 @@ test("OpenAI chat uses function tools and reasoning_effort when thinking on", ()
   assert.equal(body.reasoning_effort, "medium");
 });
 
+test("OpenAI thinking_level high sends reasoning_effort high", () => {
+  const body = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
+    model: "deepseek-v4-flash",
+    user: "hi",
+    max_tokens: 32,
+    thinking_level: "high",
+  });
+  assert.equal(body.reasoning_effort, "high");
+});
+
 test("slot empty or unavailable falls back to solver then first available", () => {
   const cat = new ProviderCatalog(dir());
   const p = cat.addProvider({

@@ -11,9 +11,10 @@ Node >= 22.19.0 (developed on 24.12.0).
 ```
 npm install
 npm test
-node dist/src/cli/index.js campaign create --spec profiles/demo-lab.json --data-dir .rionext
-node dist/src/cli/index.js campaign start --id camp_demo_lab --data-dir .rionext
+node dist/src/cli/index.js run --spec profiles/demo-lab.json
 ```
+
+`--data-dir` 默认 `.rionext`。槽位配好供应商之后，这条命令会创建战役（已存在就接着跑）并启动 Decide/Execute。`thinking_level` 默认 `high`。
 
 ## Providers
 

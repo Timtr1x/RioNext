@@ -53,7 +53,8 @@ async function main(): Promise<void> {
   if (argv[0] === "campaign") argv.shift();
   const { cmd, flags } = parseArgs(argv);
   if (cmd === "help" || cmd === "--help" || cmd === "-h") {
-    console.log(`rionext campaign create --spec <file>
+    console.log(`rionext run --spec <file> [--max-cycles 48]
+rionext campaign create --spec <file>
 rionext campaign start|pause|resume|cancel --id <id>
 rionext campaign hint --id <id> --text <hint>
 rionext campaign revise-budget --id <id> --max-calls N
@@ -114,8 +115,29 @@ rionext baseline --spec <file>`);
     }
     return;
   }
-  const engine = new Engine(makeRuntimeConfig(dir));
+  const cfg = makeRuntimeConfig(dir);
+  if (flags["lease-ms"]) cfg.lease_ttl_ms = Number(flags["lease-ms"]);
+  const engine = new Engine(cfg, {
+    maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : undefined,
+  });
   try {
+    if (cmd === "run") {
+      const specPath = flags.spec;
+      if (typeof specPath !== "string") throw new Error("--spec is required");
+      const spec = JSON.parse(readFileSync(resolve(specPath), "utf8")) as { campaign_id?: string };
+      let created = false;
+      try {
+        engine.createCampaign(spec);
+        created = true;
+      } catch (err) {
+        if (!(err instanceof DomainError && err.code === "campaign_exists")) throw err;
+      }
+      const id = typeof spec.campaign_id === "string" ? spec.campaign_id : "";
+      if (!id) throw new Error("spec.campaign_id is required");
+      await engine.start(id);
+      print({ created, id, ...engine.status(id) }, Boolean(flags.json) || true);
+      return;
+    }
     if (cmd === "create") {
       const specPath = flags.spec;
       if (typeof specPath !== "string") throw new Error("--spec is required");

@@ -19,6 +19,14 @@ test("negative budget is rejected", () => {
   assert.throws(() => validateCampaignSpec(spec), (e: unknown) => e instanceof DomainError && e.code === "negative_budget");
 });
 
+test("omitted thinking_level defaults to high", () => {
+  const spec = loadDemoSpec("think-default");
+  const raw = JSON.parse(JSON.stringify(spec)) as { model_policy: { thinking_level?: string } };
+  delete raw.model_policy.thinking_level;
+  const parsed = validateCampaignSpec(raw);
+  assert.equal(parsed.model_policy.thinking_level, "high");
+});
+
 test("unknown model is rejected", () => {
   const spec = loadDemoSpec("x");
   spec.model_policy.model = "gpt-secret";

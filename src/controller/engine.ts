@@ -613,7 +613,7 @@ function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCata
       modelName: route.model.name,
       fetchFn: (url, init) => fetch(url, init),
       maxRetries: 0,
-      timeoutMs: 60_000,
+      timeoutMs: 180_000,
     });
     return {
       stream,

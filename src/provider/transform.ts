@@ -22,6 +22,7 @@ export interface CommonRequest {
   max_tokens: number;
   tools?: CommonTool[];
   thinking?: "off" | "on" | "adaptive" | "enabled";
+  thinking_level?: "off" | "minimal" | "low" | "medium" | "high";
   image_png_base64?: string;
 }
 
@@ -47,8 +48,9 @@ function anthropicBody(req: CommonRequest): Record<string, unknown> {
     body.tool_choice = { type: "auto" };
   }
   if (req.thinking === "adaptive") body.thinking = { type: "adaptive" };
-  if (req.thinking === "enabled" || req.thinking === "on") {
-    body.thinking = { type: "enabled", budget_tokens: Math.min(2048, Math.max(256, Math.floor(req.max_tokens / 2))) };
+  else if (req.thinking === "enabled" || req.thinking === "on" || thinkingOn(req)) {
+    const budget = req.thinking_level === "high" ? Math.min(8192, Math.max(1024, Math.floor(req.max_tokens / 2))) : Math.min(2048, Math.max(256, Math.floor(req.max_tokens / 2)));
+    body.thinking = { type: "enabled", budget_tokens: budget };
   }
   return body;
 }
@@ -71,10 +73,24 @@ function chatCompletionsBody(req: CommonRequest): Record<string, unknown> {
     }));
     body.tool_choice = "auto";
   }
-  if (req.thinking === "on" || req.thinking === "enabled" || req.thinking === "adaptive") {
-    body.reasoning_effort = "medium";
-  }
+  const effort = reasoningEffort(req);
+  if (effort) body.reasoning_effort = effort;
   return body;
+}
+
+function thinkingOn(req: CommonRequest): boolean {
+  if (req.thinking === "off") return false;
+  if (req.thinking_level === "off") return false;
+  if (req.thinking_level) return true;
+  return req.thinking === "on" || req.thinking === "enabled" || req.thinking === "adaptive";
+}
+
+function reasoningEffort(req: CommonRequest): "low" | "medium" | "high" | undefined {
+  const level = req.thinking_level ?? (thinkingOn(req) ? "medium" : "off");
+  if (level === "off") return undefined;
+  if (level === "low" || level === "minimal") return "low";
+  if (level === "medium") return "medium";
+  return "high";
 }
 
 function toOpenAIMessages(req: CommonRequest): Record<string, unknown>[] {
@@ -141,9 +157,8 @@ function responsesBody(req: CommonRequest): Record<string, unknown> {
       parameters: t.parameters,
     }));
   }
-  if (req.thinking === "on" || req.thinking === "enabled" || req.thinking === "adaptive") {
-    body.reasoning = { effort: "medium" };
-  }
+  const effort = reasoningEffort(req);
+  if (effort) body.reasoning = { effort };
   return body;
 }
 
