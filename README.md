@@ -4,6 +4,8 @@ Pi-backed persistent Decide/Execute harness. Campaign state lives in SQLite and 
 
 P0 is the synthetic lab loop. P1 adds control commands and a capability-aware provider catalog (slots, probes, vision).
 
+操作步骤（Kali、provider、战役 spec、人审 flag、租约与锁）见 [docs/ops.md](docs/ops.md)。
+
 ## Run
 
 Node >= 22.19.0 (developed on 24.12.0).
