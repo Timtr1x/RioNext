@@ -15,7 +15,7 @@ const base = {
   stderr: "",
 };
 
-test("kali preview under 8k is not marked truncated", () => {
+test("kali preview under the cap is not marked truncated", () => {
   const got = decodeExec({ ...base, stdout: "hello" }, "empty") as Record<string, unknown>;
   assert.equal(got.truncated, false);
   assert.equal(got.preview_truncated, false);
@@ -23,7 +23,7 @@ test("kali preview under 8k is not marked truncated", () => {
   assert.equal(got.next_offset, undefined);
 });
 
-test("kali preview over 8k tells the model and keeps a next_offset", () => {
+test("kali preview over the cap tells the model and keeps a next_offset", () => {
   const stdout = "A".repeat(TOOL_STDOUT_PREVIEW + 50) + "UPDATE_PHP_BODY";
   const got = decodeExec({ ...base, stdout }, "empty", { id: "art_1", size: stdout.length }) as Record<string, unknown>;
   assert.equal(got.truncated, true);
@@ -35,7 +35,7 @@ test("kali preview over 8k tells the model and keeps a next_offset", () => {
   assert.equal(got.remaining_bytes, 50 + "UPDATE_PHP_BODY".length);
   assert.equal(got.artifact_id, "art_1");
   assert.equal(String(got.result).includes("UPDATE_PHP_BODY"), false);
-  assert.equal(String(got.read_next).includes("offset=8000"), true);
+  assert.equal(String(got.read_next).includes(`offset=${TOOL_STDOUT_PREVIEW}`), true);
 });
 
 test("json stdout is still sliced so a large json dump cannot bypass the preview cap", () => {

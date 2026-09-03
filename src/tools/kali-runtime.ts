@@ -169,15 +169,59 @@ function collectAllowIps(assets: string[], resolve: ResolveFn): string[] {
   return [...ips];
 }
 
-function defaultResolve(host: string): string[] {
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return [host];
-  const script = `require("node:dns").resolve4(${JSON.stringify(host)},(e,a)=>{if(e){process.stderr.write(String(e.message||e));process.exit(1)}process.stdout.write(a.join("\\n"))})`;
+const resolveCache = new Map<string, string[]>();
+
+function isIpv4(host: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+}
+
+/** Parse `getent hosts` / similar lines: `117.21.200.176  alias fqdn`. */
+export function parseGetentHosts(stdout: string): string[] {
+  const ips: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const ip = line.trim().split(/\s+/)[0];
+    if (ip && isIpv4(ip)) ips.push(ip);
+  }
+  return [...new Set(ips)];
+}
+
+/**
+ * OS GetAddrInfo (`dns.lookup`), not c-ares `resolve4`.
+ * resolve4 walks every adapter DNS server and stops on REFUSED, so a stale
+ * VMware/campus resolver can fail while Windows lookup still works.
+ */
+export function systemLookup4(host: string): string[] {
+  const script = `require("node:dns").lookup(${JSON.stringify(host)},{family:4,all:true},(e,a)=>{if(e){process.stderr.write(String(e.message||e));process.exit(1)}process.stdout.write((a||[]).map((x)=>x.address).join("\\n"))})`;
   const r = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 5_000, windowsHide: true });
-  if (r.status !== 0) throw new Error(String(r.stderr || "dns_failed"));
-  return String(r.stdout)
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  if (r.status !== 0) return [];
+  return [...new Set(String(r.stdout).split(/\s+/).map((s) => s.trim()).filter((s) => isIpv4(s)))];
+}
+
+function dockerResolve4(host: string): string[] {
+  const r = spawnSync(
+    "docker",
+    ["run", "--rm", "--network", "bridge", "--entrypoint", "getent", KALI_IMAGE, "hosts", host],
+    { encoding: "utf8", timeout: 20_000, windowsHide: true },
+  );
+  if ((r.status ?? 1) !== 0) return [];
+  return parseGetentHosts(String(r.stdout ?? ""));
+}
+
+function defaultResolve(host: string): string[] {
+  if (isIpv4(host)) return [host];
+  const cached = resolveCache.get(host);
+  if (cached) return cached;
+  const fromOs = systemLookup4(host);
+  if (fromOs.length) {
+    resolveCache.set(host, fromOs);
+    return fromOs;
+  }
+  const fromDocker = dockerResolve4(host);
+  if (fromDocker.length) {
+    resolveCache.set(host, fromDocker);
+    return fromDocker;
+  }
+  throw new Error(`dns_failed:${host}`);
 }
 
 export function assertNoSecretEnv(env: Record<string, string>): void {

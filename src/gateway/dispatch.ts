@@ -120,6 +120,12 @@ export class DispatchGate {
       this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
       return { status: "sent", invocation_id: permit.invocation_id, execution_id: sent.execution_id };
     } catch (err) {
+      if (err instanceof DomainError && (err.category === "denied" || err.category === "invalid_input")) {
+        this.invocations.mark(permit.invocation_id, "failed_known", { error: String(err) });
+        this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
+        this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
+        return { status: "rejected", reason: `${err.code}:${err.message}`, invocation_id: permit.invocation_id };
+      }
       this.invocations.mark(permit.invocation_id, "uncertain", { error: String(err) });
       this.budget.markLiability(req.lease.campaign_id, permit.invocation_id, 1, 0, 0);
       return { status: "in_flight", reason: String(err), invocation_id: permit.invocation_id };

@@ -1,3 +1,4 @@
+import { DomainError } from "../domain/errors.ts";
 import type { EffectAdapter } from "./effect-adapter.ts";
 import { KALI_BINARIES, shouldBackgroundKali } from "./kali-profile.ts";
 import type { KaliStartOpts, KaliRuntime } from "./kali-runtime.ts";
@@ -36,7 +37,7 @@ export class KaliEffectAdapter implements EffectAdapter {
   ) {}
 
   send(invocationId: string, payload: unknown): { execution_id: string; pending?: boolean } {
-    if (!isKaliPayload(payload)) throw new Error("not a kali payload");
+    if (!isKaliPayload(payload)) throw new DomainError("kali_payload", "not a kali payload", "invalid_input");
     this.n += 1;
     const execution_id = `kali_${invocationId}`;
     const opts = this.optsFor(invocationId);

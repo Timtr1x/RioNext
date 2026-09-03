@@ -1,3 +1,5 @@
+import { DomainError } from "../domain/errors.ts";
+
 export const KALI_IMAGE = process.env.RIONEXT_KALI_IMAGE ?? "rionext-kali:rolling";
 export const KALI_MASTER_TAG = "rionext-kali:master";
 export const KALI_BASE_IMAGE = "kalilinux/kali-rolling";
@@ -82,19 +84,23 @@ export function isAllowedKaliBin(bin: string): boolean {
 }
 
 /** Relative path under /workspace. Absolute paths must start with /workspace/. */
+function argvDenied(message: string): never {
+  throw new DomainError("kali_argv", message, "invalid_input");
+}
+
 export function workspaceRelPath(raw: string): string {
   const n = raw.replace(/\\/g, "/").replace(/^\.\//, "");
   if (!n || n === "." || n === "/workspace" || n === "/workspace/") {
-    throw new Error("workspace path is empty");
+    argvDenied("workspace path is empty");
   }
   if (n.split("/").includes("..") || n.includes("\0")) {
-    throw new Error("workspace path escape");
+    argvDenied("workspace path escape");
   }
   if (n.startsWith("/")) {
-    if (!n.startsWith("/workspace/")) throw new Error("path must be under /workspace");
+    if (!n.startsWith("/workspace/")) argvDenied("path must be under /workspace");
     return n.slice("/workspace/".length);
   }
-  if (n.startsWith("~") || n.startsWith("-")) throw new Error("workspace path escape");
+  if (n.startsWith("~") || n.startsWith("-")) argvDenied("workspace path escape");
   return n;
 }
 
@@ -140,7 +146,7 @@ export function shouldBackgroundKali(bin: string, _timeoutMs?: number): boolean 
 
 export function assertKaliArgv(bin: string, args: string[]): void {
   if (!isAllowedKaliBin(bin)) {
-    throw new Error(`kali binary not allowlisted: ${bin}`);
+    argvDenied(`kali binary not allowlisted: ${bin}`);
   }
   if (KALI_INTERPRETERS.has(bin)) {
     assertInterpreterArgv(args);
@@ -151,7 +157,7 @@ export function assertKaliArgv(bin: string, args: string[]): void {
     return;
   }
   for (const a of args) {
-    if (hasMeta(a)) throw new Error("kali args contain shell metacharacters");
+    if (hasMeta(a)) argvDenied("kali args contain shell metacharacters");
   }
 }
 
@@ -159,30 +165,30 @@ function assertInterpreterArgv(args: string[]): void {
   const cIdx = args.indexOf("-c");
   if (cIdx >= 0) {
     if (cIdx !== args.length - 2) {
-      throw new Error("interpreter -c requires a single script argument");
+      argvDenied("interpreter -c requires a single script argument");
     }
     for (let i = 0; i < cIdx; i++) {
       if (!/^-[A-Za-z0-9]+$/.test(args[i]!)) {
-        throw new Error("interpreter flags must be simple");
+        argvDenied("interpreter flags must be simple");
       }
     }
     const script = args[cIdx + 1] ?? "";
-    if (script.length > 200_000) throw new Error("script too large");
+    if (script.length > 200_000) argvDenied("script too large");
     return;
   }
   const files = args.filter((a) => !a.startsWith("-"));
-  if (files.length === 0) throw new Error("interpreter requires -c or a /workspace script");
+  if (files.length === 0) argvDenied("interpreter requires -c or a /workspace script");
   for (const f of files) workspaceRelPath(f);
   for (const a of args) {
     if (files.includes(a)) continue;
-    if (hasMeta(a)) throw new Error("kali args contain shell metacharacters");
+    if (hasMeta(a)) argvDenied("kali args contain shell metacharacters");
   }
 }
 
 function assertPathBinArgv(bin: string, args: string[]): void {
   for (const a of args) {
     if (a.startsWith("-") || (bin === "chmod" && /^[+=ugoa]*[rwxXst]+$/.test(a))) continue;
-    if (hasMeta(a)) throw new Error("kali args contain shell metacharacters");
+    if (hasMeta(a)) argvDenied("kali args contain shell metacharacters");
     workspaceRelPath(a);
   }
 }

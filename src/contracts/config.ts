@@ -37,7 +37,7 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   max_active_frontier_items: 64,
   lease_ttl_ms: 15 * 60_000,
   heartbeat_ms: 20_000,
-  tool_preview_limit: 8192,
+  tool_preview_limit: 50_000,
   automatic_model_fallback: false,
   automatic_extension_loading: false,
 };

@@ -11,6 +11,10 @@ import { actWorld, inspectWorld, type LabWorld } from "../../tools/synthetic.ts"
 import type { StreamFn as PiStreamFn } from "@earendil-works/pi-agent-core";
 import { SCRIPTED_MODEL, type TurnChooser, createScriptedStreamFn } from "./scripted-stream.ts";
 
+export const TOOL_STDOUT_PREVIEW = 50_000;
+export const TOOL_STDERR_PREVIEW = 2000;
+export const ARTIFACT_SLICE_MAX = 50_000;
+
 export interface FactoryDeps {
   storage: StorageService;
   modelGatewayFor: (lease: RunLease, inner: PiStreamFn) => ModelGateway;
@@ -116,7 +120,7 @@ export class PiWorker implements WorkerRuntime {
             run_id: lease.run_id,
             attempt_id: lease.run_id,
             subject: `tool_raw:${toolCall.name}`,
-            body: { name: toolCall.name, arguments: toolCall.arguments, preview: text.slice(0, 8000) },
+            body: { name: toolCall.name, arguments: toolCall.arguments, preview: text.slice(0, TOOL_STDOUT_PREVIEW) },
             artifact_refs: [art.id],
             conditions: {},
             env_rev: String(
@@ -475,10 +479,6 @@ function tool(
 function ok(details: unknown): { content: { type: "text"; text: string }[]; details: unknown } {
   return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 }
-
-export const TOOL_STDOUT_PREVIEW = 8000;
-export const TOOL_STDERR_PREVIEW = 2000;
-export const ARTIFACT_SLICE_MAX = 8192;
 
 async function packKaliExec(
   storage: StorageService,

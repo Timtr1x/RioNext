@@ -10,7 +10,7 @@ import { loadKaliSpec } from "../../src/eval/helpers.ts";
 import { FakeDockerCli, ProcessDockerCli } from "../../src/tools/docker-cli.ts";
 import { checkEgress, checkRedirect, isLoopbackHost, parseAllowList, parseDestination } from "../../src/tools/egress.ts";
 import { assertKaliArgv, KALI_KEEPER_NAME, shouldBackgroundKali, workspaceRelPath } from "../../src/tools/kali-profile.ts";
-import { buildContainerSpec, kaliEntrypointHost, KaliRuntime, containerName } from "../../src/tools/kali-runtime.ts";
+import { buildContainerSpec, kaliEntrypointHost, KaliRuntime, containerName, parseGetentHosts, systemLookup4 } from "../../src/tools/kali-runtime.ts";
 import type { RunLease } from "../../src/domain/types.ts";
 
 function tmp(): string {
@@ -106,6 +106,43 @@ test("K06 host and redirect not in allowlist are denied", () => {
   assert.equal(redir.ok, false);
 });
 
+test("parseGetentHosts keeps IPv4 columns from getent hosts", () => {
+  assert.deepEqual(parseGetentHosts("117.21.200.176  node5.buuoj.cn foo.http-ctf2.dasctf.com\n"), ["117.21.200.176"]);
+  assert.deepEqual(parseGetentHosts(""), []);
+});
+
+test("systemLookup4 uses OS GetAddrInfo for localhost, not c-ares resolve4", () => {
+  const ips = systemLookup4("localhost");
+  assert.ok(ips.includes("127.0.0.1"), `localhost IPv4 got ${JSON.stringify(ips)}`);
+});
+
+test("egress deny on kali_run is failed_known and drops the workspace lock", () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  const e = new Engine(makeRuntimeConfig(dir), {
+    silent: true,
+    maxCycles: 1,
+    dockerCli: docker,
+    kaliResolve: () => {
+      throw new Error("queryA EREFUSED x");
+    },
+  });
+  const spec = loadKaliSpec("t-dns");
+  e.createCampaign(spec);
+  const lease = kaliLease(e, "t-dns");
+  const sent = e.dispatchGate.dispatch({
+    lease,
+    purpose: "kali_run",
+    payload: { kind: "kali", bin: "curl", args: ["-sS", "http://lab.internal/"], url: "http://lab.internal/" },
+    effect: "read",
+    envTool: true,
+  });
+  assert.equal(sent.status, "rejected");
+  assert.match(String(sent.reason), /resolve_failed|egress_denied/);
+  assert.equal(e.storage.listResourceLocks("t-dns").length, 0);
+  assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
+});
+
 test("K06 nmap against an out-of-scope IP is denied", () => {
   const docker = new FakeDockerCli();
   const rt = new KaliRuntime(docker);
@@ -127,8 +164,36 @@ test("K06 nmap against an out-of-scope IP is denied", () => {
   );
 });
 
+test("kali argv deny on dispatch is failed_known and drops the workspace lock", () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  const e = new Engine(makeRuntimeConfig(dir), {
+    silent: true,
+    maxCycles: 1,
+    dockerCli: docker,
+    kaliResolve: (h) => (h === "lab.internal" ? ["10.0.0.8"] : [h]),
+  });
+  const spec = loadKaliSpec("t-argv");
+  e.createCampaign(spec);
+  const lease = kaliLease(e, "t-argv");
+  const sent = e.dispatchGate.dispatch({
+    lease,
+    purpose: "kali_run",
+    payload: { kind: "kali", bin: "curl", args: ["-sS", "http://lab.internal/;id"] },
+    effect: "read",
+    envTool: true,
+  });
+  assert.equal(sent.status, "rejected");
+  assert.match(String(sent.reason), /kali_argv|metacharacters/);
+  assert.equal(e.storage.listResourceLocks("t-argv").length, 0);
+  assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
+});
+
 test("kali argv rejects unknown binaries and shell metacharacters", () => {
-  assert.throws(() => assertKaliArgv("nmap", ["-p", "80; curl evil"]));
+  assert.throws(
+    () => assertKaliArgv("nmap", ["-p", "80; curl evil"]),
+    (e: unknown) => e instanceof DomainError && e.code === "kali_argv",
+  );
   assert.doesNotThrow(() => assertKaliArgv("nmap", ["-sn", "10.0.0.1"]));
   assert.doesNotThrow(() => assertKaliArgv("impacket-secretsdump", ["-h"]));
   assert.doesNotThrow(() => assertKaliArgv("nuclei", ["-duc", "-t", "/opt/nuclei-templates", "-u", "https://10.0.0.1/"]));
