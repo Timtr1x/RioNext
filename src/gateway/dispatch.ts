@@ -120,7 +120,10 @@ export class DispatchGate {
       this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
       return { status: "sent", invocation_id: permit.invocation_id, execution_id: sent.execution_id };
     } catch (err) {
-      if (err instanceof DomainError && (err.category === "denied" || err.category === "invalid_input")) {
+      if (
+        err instanceof DomainError &&
+        (err.category === "denied" || err.category === "invalid_input" || err.category === "protocol_error")
+      ) {
         this.invocations.mark(permit.invocation_id, "failed_known", { error: String(err) });
         this.budget.settle(req.lease.campaign_id, permit.invocation_id, 1, 0, 0, 1, 0, 0);
         this.storage.releaseResourceLocksForInvocation(req.lease.campaign_id, permit.invocation_id);
@@ -200,7 +203,12 @@ export class DispatchGate {
       } else if (state === "uncertain") {
         const ext = row.external_id ? String(row.external_id) : null;
         const reservedCalls = Number(row.reserved_calls ?? 0);
-        if (ext && this.adapter.query(ext) === "completed") {
+        if (!ext) {
+          this.invocations.mark(id, "failed_known", { error: "never_sent" });
+          this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
+          this.storage.releaseResourceLocksForInvocation(campaignId, id);
+          reconciled += 1;
+        } else if (ext && this.adapter.query(ext) === "completed") {
           this.invocations.mark(id, "reconciled");
           this.budget.reconcileLiability(campaignId, `rec:${id}`, reservedCalls, reservedCalls);
           this.storage.releaseResourceLocksForInvocation(campaignId, id);

@@ -221,7 +221,7 @@ function defaultResolve(host: string): string[] {
     resolveCache.set(host, fromDocker);
     return fromDocker;
   }
-  throw new Error(`dns_failed:${host}`);
+  throw new DomainError("dns_failed", `dns_failed:${host}`, "denied");
 }
 
 export function assertNoSecretEnv(env: Record<string, string>): void {

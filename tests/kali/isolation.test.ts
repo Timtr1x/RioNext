@@ -189,6 +189,59 @@ test("kali argv deny on dispatch is failed_known and drops the workspace lock", 
   assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
 });
 
+test("kali_start protocol_error is failed_known and drops the workspace lock", () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  docker.images.clear();
+  const e = new Engine(makeRuntimeConfig(dir), {
+    silent: true,
+    maxCycles: 1,
+    dockerCli: docker,
+    kaliResolve: (h) => (h === "lab.internal" ? ["10.0.0.8"] : [h]),
+  });
+  const spec = loadKaliSpec("t-start");
+  e.createCampaign(spec);
+  const lease = kaliLease(e, "t-start");
+  const sent = e.dispatchGate.dispatch({
+    lease,
+    purpose: "kali_run",
+    payload: { kind: "kali", bin: "curl", args: ["-sS", "http://lab.internal/"], url: "http://lab.internal/" },
+    effect: "read",
+    envTool: true,
+  });
+  assert.equal(sent.status, "rejected");
+  assert.match(String(sent.reason), /kali_master_missing|kali_start/);
+  assert.equal(e.storage.listResourceLocks("t-start").length, 0);
+  assert.equal(String(e.invocations.get(sent.invocation_id).state), "failed_known");
+});
+
+test("recover drops workspace lock when uncertain kali never got an external_id", () => {
+  const dir = tmp();
+  const docker = new FakeDockerCli();
+  const e = kaliEngine(dir, docker);
+  const spec = loadKaliSpec("t-rec");
+  e.createCampaign(spec);
+  const lease = kaliLease(e, "t-rec");
+  const inv = e.invocations.prepare({
+    campaign_id: "t-rec",
+    run_id: lease.run_id,
+    kind: "tool",
+    purpose: "kali_run",
+    fence: lease.fence,
+    cancel_epoch: lease.cancel_epoch,
+    effect_class: "unknown",
+    reserved_calls: 1,
+  });
+  e.budget.reserve("t-rec", inv.id, 1, 0, 0);
+  e.budget.markLiability("t-rec", inv.id, 1, 0, 0);
+  e.invocations.mark(inv.id, "uncertain", { error: "generic boom" });
+  assert.equal(e.storage.acquireResourceLock("t-rec", "workspace:t-rec", inv.id, false), true);
+  const rec = e.dispatchGate.recover("t-rec");
+  assert.equal(rec.reconciled >= 1, true);
+  assert.equal(e.storage.listResourceLocks("t-rec").length, 0);
+  assert.equal(String(e.invocations.get(inv.id).state), "failed_known");
+});
+
 test("kali argv rejects unknown binaries and shell metacharacters", () => {
   assert.throws(
     () => assertKaliArgv("nmap", ["-p", "80; curl evil"]),
@@ -474,10 +527,16 @@ function kaliEngine(dir: string, docker: FakeDockerCli): Engine {
   });
 }
 
+class CrashExecDocker extends FakeDockerCli {
+  override run(argv: string[], opts?: { timeoutMs?: number; maxBytes?: number; input?: string }) {
+    if (argv[0] === "exec") throw new Error("docker exec crashed");
+    return super.run(argv, opts);
+  }
+}
+
 test("K08 unknown-effect lock survives finishRun and is released only after cancel kills the clone", () => {
   const dir = tmp();
-  const docker = new FakeDockerCli();
-  docker.images.clear();
+  const docker = new CrashExecDocker();
   const e = kaliEngine(dir, docker);
   const spec = loadKaliSpec("t-k08");
   e.createCampaign(spec);
@@ -546,8 +605,7 @@ test("env dispatch writes an operations row and recover does not docker run agai
 
 test("status lists residual after uncertain kali send and cancel does not claim retract", () => {
   const dir = tmp();
-  const docker = new FakeDockerCli();
-  docker.images.clear();
+  const docker = new CrashExecDocker();
   const e = kaliEngine(dir, docker);
   e.createCampaign(loadKaliSpec("t-l13"));
   const lease = kaliLease(e, "t-l13");
