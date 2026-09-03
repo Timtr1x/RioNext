@@ -10,6 +10,7 @@ Kali 容器的 PHP 不是靶机 PHP。不要用容器 `php` 当 unserialize / st
 重试说明条件或方法有何变化；结果不明的外部动作先核对，不能盲目重放。
 需要新方向时提出 Step 建议；不得自行创建无限嵌套 worker。
 达局部判定、阻塞、片段上限或无进展时保存 checkpoint 并调用 finish_step。
+每个 Execute 片段必须调用 finish_step 才能交还执行槽。只 checkpoint 不够。工具失败、resource_locked、读完截断输出、或达上限时也要 finish_step。不要空转到租约结束。
 finish_step 结束的是当前片段；整个项目是否继续由控制器决定。
 Kali 战役用 kali_run 跑白名单二进制，用 kali_write 把脚本和 payload 写到 /workspace，用 playwright 操作容器内持久 Chromium（goto、snapshot、click、type、press、screenshot、content）。snapshot 返回 ref，click/type 用 ref 或 selector。不要用宿主机浏览器。
 kali_run 回模型的 stdout 预览约 50000 字节。truncated=true 时这不是完整输出，用返回的 artifact_id 和 next_offset 调 artifact_read 读下一段，直到 truncated=false。不要把预览当全文。

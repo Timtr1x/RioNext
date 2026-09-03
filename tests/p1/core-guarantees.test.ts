@@ -449,6 +449,7 @@ test("execute prompt forbids container php as unserialize oracle", () => {
   assert.match(prompt, /容器/);
   assert.match(prompt, /artifact_read/);
   assert.match(prompt, /truncated/);
+  assert.match(prompt, /必须调用 finish_step/);
 });
 
 test("hints land in the next context pack", () => {

@@ -438,7 +438,7 @@ export class PiWorker implements WorkerRuntime {
         }), async (_id, _params) => {
           return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
         }),
-        tool("finish_step", "Finish execute fragment", Type.Object({
+        tool("finish_step", "Required: end this execute fragment and free the slot. Call after progress, failure, truncated output, or cap. Checkpoint alone does not finish.", Type.Object({
           reason: Type.String(),
           summary: Type.String(),
           blocked_on: Type.Optional(Type.String()),
