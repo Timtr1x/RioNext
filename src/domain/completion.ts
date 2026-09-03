@@ -27,6 +27,7 @@ export interface CompletionSnapshot {
   findings: { status: FindingStatus }[];
   coverage: CoverageRow[];
   root_goal_satisfied: boolean;
+  pending_goal_claim?: boolean;
 }
 
 export interface CoverageRow {
@@ -59,6 +60,15 @@ export function evaluateCompletion(snap: CompletionSnapshot): CompletionResult {
   if (snap.uncertain_invocations > 0) {
     blockers.push("uncertain_invocations");
     return { canClose: false, suggestedState: "waiting", blockers };
+  }
+  if (snap.mode === "goal_seeking" && snap.root_goal_satisfied) {
+    return { canClose: true, suggestedState: "completed", blockers: [] };
+  }
+  if (snap.mode === "goal_seeking" && snap.pending_goal_claim) {
+    return { canClose: false, suggestedState: "awaiting_verify", blockers: ["human_goal_verify"] };
+  }
+  if (snap.state === "awaiting_verify") {
+    return { canClose: false, suggestedState: "awaiting_verify", blockers: ["human_goal_verify"] };
   }
   if (snap.unconsumed_events > 0) {
     blockers.push("unconsumed_events");

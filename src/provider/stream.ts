@@ -8,7 +8,7 @@ import {
 import type { ProviderCatalog } from "./catalog.ts";
 import { postJson, type FetchFn } from "./client.ts";
 import { buildProtocolBody, extractText, extractToolCalls, extractUsage, type CommonTool, type ProtocolMessage } from "./transform.ts";
-import { OUTPUT_DEFAULT } from "./types.ts";
+import { OUTPUT_DEFAULT, STREAM_TIMEOUT_DEFAULT_MS } from "./types.ts";
 import { createToolStream } from "../runtime/pi/scripted-stream.ts";
 
 export interface CataloguedStreamStats {
@@ -132,14 +132,14 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
             apiKey: key,
             body,
             fetchFn: opts.fetchFn,
-            timeoutMs: opts.timeoutMs ?? options?.timeoutMs ?? 5_000,
+            timeoutMs: opts.timeoutMs ?? options?.timeoutMs ?? STREAM_TIMEOUT_DEFAULT_MS,
             signal: options?.signal,
           });
           if (res.ok) {
             const usage = extractUsage(res.json);
             const calls = extractToolCalls(provider.protocol, res.json);
             if (calls.length) {
-              return createToolStream(model, calls, "toolUse");
+              return createToolStream(model, calls, "toolUse", usage);
             }
             const text = extractText(provider.protocol, res.json);
             return createTextStream(model, text || "ok", usage);

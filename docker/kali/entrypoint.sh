@@ -4,13 +4,13 @@ set -eu
 if [ -n "${RIONEXT_ALLOW_IPS:-}" ] && command -v iptables >/dev/null 2>&1; then
   iptables -F OUTPUT 2>/dev/null || true
   iptables -P OUTPUT DROP 2>/dev/null || true
-  iptables -A OUTPUT -o lo -j ACCEPT
-  iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-  iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+  iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
+  iptables -A OUTPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+  iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
   old_ifs=$IFS
   IFS=,
   for ip in $RIONEXT_ALLOW_IPS; do
-    [ -n "$ip" ] && iptables -A OUTPUT -d "$ip" -j ACCEPT
+    [ -n "$ip" ] && iptables -A OUTPUT -d "$ip" -j ACCEPT 2>/dev/null || true
   done
   IFS=$old_ifs
 fi

@@ -19,6 +19,17 @@ test("negative budget is rejected", () => {
   assert.throws(() => validateCampaignSpec(spec), (e: unknown) => e instanceof DomainError && e.code === "negative_budget");
 });
 
+test("omitted budget caps default to 1000 calls and 10_000_000 tokens", () => {
+  const spec = loadDemoSpec("budget-default");
+  const raw = JSON.parse(JSON.stringify(spec)) as { budget: Record<string, unknown> };
+  delete raw.budget.max_calls;
+  delete raw.budget.max_tokens;
+  delete raw.budget.max_cost_micro;
+  const parsed = validateCampaignSpec(raw);
+  assert.equal(parsed.budget.max_calls, 1000);
+  assert.equal(parsed.budget.max_tokens, 10_000_000);
+});
+
 test("omitted thinking_level defaults to high", () => {
   const spec = loadDemoSpec("think-default");
   const raw = JSON.parse(JSON.stringify(spec)) as { model_policy: { thinking_level?: string } };
@@ -91,6 +102,56 @@ test("assessment with untested mandatory coverage cannot close", () => {
   });
   assert.equal(r.canClose, false);
   assert.ok(r.blockers.includes("mandatory_coverage_untested"));
+});
+
+test("goal_seeking with a pending flag claim waits for human verify", () => {
+  const r = evaluateCompletion({
+    mode: "goal_seeking",
+    state: "active",
+    cancel_epoch: 0,
+    in_flight_runs: 0,
+    in_flight_invocations: 0,
+    unconsumed_events: 0,
+    pending_important_proposals: 0,
+    uncertain_invocations: 0,
+    empty_reviews: 0,
+    max_empty_reviews: 6,
+    ready_steps: 0,
+    blocked_steps: 0,
+    frontier_size: 0,
+    new_observation_since_progress: false,
+    findings: [],
+    coverage: [],
+    root_goal_satisfied: false,
+    pending_goal_claim: true,
+  });
+  assert.equal(r.canClose, false);
+  assert.equal(r.suggestedState, "awaiting_verify");
+  assert.ok(r.blockers.includes("human_goal_verify"));
+});
+
+test("goal_seeking closes when the success fact is accepted even with leftover ready steps", () => {
+  const r = evaluateCompletion({
+    mode: "goal_seeking",
+    state: "active",
+    cancel_epoch: 0,
+    in_flight_runs: 0,
+    in_flight_invocations: 0,
+    unconsumed_events: 1,
+    pending_important_proposals: 0,
+    uncertain_invocations: 0,
+    empty_reviews: 0,
+    max_empty_reviews: 6,
+    ready_steps: 2,
+    blocked_steps: 0,
+    frontier_size: 2,
+    new_observation_since_progress: true,
+    findings: [],
+    coverage: [],
+    root_goal_satisfied: true,
+  });
+  assert.equal(r.canClose, true);
+  assert.equal(r.suggestedState, "completed");
 });
 
 test("empty frontier without new observation is plateau not completed", () => {

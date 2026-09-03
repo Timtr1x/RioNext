@@ -54,6 +54,7 @@ export function isQuiescentCampaign(state: CampaignState): boolean {
     state === "plateau" ||
     state === "budget_paused" ||
     state === "paused" ||
+    state === "awaiting_verify" ||
     state === "completed" ||
     state === "cancelled"
   );

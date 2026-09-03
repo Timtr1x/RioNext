@@ -16,6 +16,7 @@ import { InvocationBook } from "../gateway/invocation.ts";
 import { ProviderCatalog } from "../provider/catalog.ts";
 import { resolveSlot } from "../provider/router.ts";
 import { createCataloguedProviderStream } from "../provider/stream.ts";
+import { STREAM_TIMEOUT_DEFAULT_MS } from "../provider/types.ts";
 import { PiWorkerFactory, type PiWorker } from "../runtime/pi/factory.ts";
 import type { TurnChooser } from "../runtime/pi/scripted-stream.ts";
 import type { DockerCli } from "../tools/docker-cli.ts";
@@ -55,6 +56,7 @@ export class Engine {
   modelSends = 0;
   toolSends = 0;
   envSends = 0;
+  private readonly modelReserveTokens: number;
 
   constructor(
     readonly configIn: RuntimeConfig,
@@ -73,6 +75,7 @@ export class Engine {
     const adapter = new RoutingEffectAdapter(fileAdapter, kaliAdapter);
     this.dispatchGate = new DispatchGate(this.storage, this.budget, this.invocations, adapter);
     const live = options.chooseDecide || options.chooseExecute ? null : tryLiveCatalog(configIn.data_dir);
+    this.modelReserveTokens = live?.reserveTokens ?? 16;
     this.factory = new PiWorkerFactory({
       storage: this.storage,
       modelGatewayFor: (lease, inner) =>
@@ -110,6 +113,18 @@ export class Engine {
     return configFingerprint(this.config);
   }
 
+  listCampaigns(): {
+    id: string;
+    state: CampaignState;
+    updated_at: string;
+    pending_goal_claim: { id: string; proposition: string; fact_key: string } | null;
+  }[] {
+    return this.storage.listCampaigns().map((row) => ({
+      ...row,
+      pending_goal_claim: this.storage.pendingGoalClaim(row.id),
+    }));
+  }
+
   createCampaign(specInput: unknown): { id: string; state: CampaignState } {
     const spec = validateStartupInput(specInput, this.config);
     const existing = this.storage.store.db.prepare("SELECT id FROM campaigns WHERE id = ?").get(spec.campaign_id);
@@ -129,6 +144,10 @@ export class Engine {
       this.storage.setCampaignState(campaignId, "active", { kind: "user", id: "cli" });
     }
     if (camp0.state === "cancelled") return;
+    if (camp0.state === "awaiting_verify") {
+      this.log(`campaign ${campaignId} is awaiting_verify; use verify-goal --accept or --reject`);
+      return;
+    }
     await this.pollOperations(campaignId);
     await this.runLoop(campaignId);
   }
@@ -172,6 +191,33 @@ export class Engine {
 
   hint(campaignId: string, text: string): number {
     return this.storage.persistHint(campaignId, text, { kind: "user", id: "cli" });
+  }
+
+  verifyGoal(
+    campaignId: string,
+    verdict: { accept: boolean; text?: string; factId?: string },
+  ): { state: string; fact_id?: string; proposition?: string; epoch: number } {
+    const actor = { kind: "user" as const, id: "cli" };
+    const pending = this.storage.pendingGoalClaim(campaignId);
+    const factId = verdict.factId ?? pending?.id;
+    if (verdict.accept) {
+      if (!factId) throw new DomainError("no_goal_claim", "no pending success-predicate fact to accept", "invalid_input");
+      this.storage.acceptGoalClaim(campaignId, factId, actor);
+      const snap = this.snapshot(campaignId);
+      const decision = evaluateCompletion(snap);
+      if (decision.canClose) {
+        const { H } = enterClosing(this, campaignId);
+        const committed = commitCompletion(this, campaignId, H);
+        if (!committed.ok) {
+          this.storage.setCampaignState(campaignId, "active", { kind: "controller", id: "engine" });
+        }
+      }
+      const camp = this.storage.getCampaign(campaignId);
+      return { state: camp.state, fact_id: factId, proposition: pending?.proposition, epoch: camp.epoch };
+    }
+    const rejected = this.storage.rejectGoalClaim(campaignId, verdict.text ?? "", actor, factId);
+    const after = this.storage.getCampaign(campaignId);
+    return { state: after.state, fact_id: factId, proposition: rejected.proposition, epoch: after.epoch };
   }
 
   reviseBudget(campaignId: string, patch: { max_calls?: number; max_tokens?: number; max_cost_micro?: number }): number {
@@ -261,15 +307,23 @@ export class Engine {
   }
 
   async runLoop(campaignId: string): Promise<void> {
-    const maxCycles = this.options.maxCycles ?? 48;
+    const maxCycles = this.options.maxCycles ?? 1000;
+    let decideAttemptedFor = -1;
+    let lastDecideResolved = false;
     for (let i = 0; i < maxCycles; i++) {
       const camp = this.storage.getCampaign(campaignId);
-      if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused") break;
+      if (camp.state === "cancelled" || camp.state === "completed" || camp.state === "paused" || camp.state === "awaiting_verify") break;
       const polled = await this.pollOperations(campaignId);
       this.storage.heartbeatControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
       this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
-      if (!this.budget.canAdmit(campaignId, 1, 0, 0)) {
+      const worldEarly = this.storage.getWorld<LabWorld>(campaignId, freshWorld());
+      if (this.storage.pendingGoalClaim(campaignId) && !rootGoalSatisfied(camp.spec, this.storage, campaignId, worldEarly)) {
+        this.storage.persistPause(campaignId, { kind: "controller", id: "engine" }, "awaiting_verify");
+        this.writeReport(campaignId, "awaiting_verify");
+        break;
+      }
+      if (!this.budget.canAdmit(campaignId, 1, this.modelReserveTokens, 0)) {
         if (camp.state !== "budget_paused") {
           this.storage.persistPause(campaignId, { kind: "controller", id: "engine" }, "budget_paused");
         }
@@ -283,13 +337,28 @@ export class Engine {
       const decideLock = this.storage.store.db.prepare("SELECT decide_lock_owner FROM campaigns WHERE id = ?").get(campaignId) as {
         decide_lock_owner: string | null;
       };
-      if (needDecide && !decideLock.decide_lock_owner && camp.state !== "budget_paused") {
-        await this.runDecide(campaignId);
+      const emptyFrontier = counts.ready + counts.blocked + counts.deferred === 0;
+      const canRetryEmptyReview =
+        lastDecideResolved &&
+        emptyFrontier &&
+        camp.empty_reviews < camp.spec.stop_policy.max_empty_reviews_per_progress_epoch;
+      let ranDecide = false;
+      if (
+        needDecide &&
+        !decideLock.decide_lock_owner &&
+        camp.state !== "budget_paused" &&
+        (camp.requested_seq > decideAttemptedFor || canRetryEmptyReview)
+      ) {
+        const decided = await this.runDecide(campaignId);
+        ranDecide = Boolean(decided);
+        lastDecideResolved = decided?.reason === "resolved";
+        decideAttemptedFor = this.storage.getCampaign(campaignId).requested_seq;
       }
       const afterDecide = this.storage.getCampaign(campaignId);
       if (afterDecide.state === "cancelled") break;
-      if (this.budget.canAdmit(campaignId, 1, 0, 0)) {
-        await this.runExecuteSlot(campaignId);
+      let ranExecute = false;
+      if (this.budget.canAdmit(campaignId, 1, this.modelReserveTokens, 0)) {
+        ranExecute = Boolean(await this.runExecuteSlot(campaignId));
       }
       this.storage.consumeReviewedEvents(campaignId);
       this.storage.recomputeStepReadiness(campaignId);
@@ -331,9 +400,20 @@ export class Engine {
           break;
         }
       }
+      if (decision.suggestedState === "awaiting_verify") {
+        const now = this.storage.getCampaign(campaignId);
+        if (now.state !== "awaiting_verify") {
+          this.storage.persistPause(campaignId, { kind: "controller", id: "engine" }, "awaiting_verify");
+        }
+        this.writeReport(campaignId, "awaiting_verify");
+        break;
+      }
       if (decision.suggestedState === "budget_paused") {
         this.storage.persistPause(campaignId, { kind: "controller", id: "engine" }, "budget_paused");
         this.writeReport(campaignId, "budget_paused");
+        break;
+      }
+      if (!ranDecide && !ranExecute && polled.still_running === 0 && snap.ready_steps === 0) {
         break;
       }
     }
@@ -447,6 +527,7 @@ export class Engine {
       findings,
       coverage,
       root_goal_satisfied: rootGoalSatisfied(camp.spec, this.storage, campaignId, world),
+      pending_goal_claim: Boolean(this.storage.pendingGoalClaim(campaignId)),
     };
   }
 
@@ -547,6 +628,8 @@ export class Engine {
       uncertain_invocations: uncertain,
       operations_open: opsOpen,
       residual,
+      pending_goal_claim: this.storage.pendingGoalClaim(campaignId),
+      root_goal_satisfied: rootGoalSatisfied(camp.spec, this.storage, campaignId, this.storage.getWorld<LabWorld>(campaignId, freshWorld())),
     };
   }
 
@@ -615,7 +698,7 @@ function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCata
       modelName: route.model.name,
       fetchFn: (url, init) => fetch(url, init),
       maxRetries: 0,
-      timeoutMs: 180_000,
+      timeoutMs: STREAM_TIMEOUT_DEFAULT_MS,
     });
     return {
       stream,
@@ -646,7 +729,7 @@ function rootGoalSatisfied(spec: CampaignSpec, storage: StorageService, campaign
   if (ref === "sample_recovered") return oracleGoalSatisfied(world);
   const fact = storage.store.db
     .prepare(
-      "SELECT id FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'accepted' AND validity = 'current' LIMIT 1",
+      "SELECT id FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'accepted' AND validity = 'current' AND source_grade = 'verified' LIMIT 1",
     )
     .get(campaignId, ref);
   return Boolean(fact);

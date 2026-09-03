@@ -189,6 +189,12 @@ export class StorageService {
     return this.getCampaign(spec.campaign_id);
   }
 
+  listCampaigns(): { id: string; state: CampaignState; updated_at: string }[] {
+    return this.store.db
+      .prepare("SELECT id, state, updated_at FROM campaigns ORDER BY updated_at DESC")
+      .all() as { id: string; state: CampaignState; updated_at: string }[];
+  }
+
   getCampaign(id: string): CampaignRecord {
     const row = this.store.db.prepare("SELECT * FROM campaigns WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) throw invalidInput("campaign_not_found", `campaign ${id} not found`);
@@ -236,7 +242,7 @@ export class StorageService {
     });
   }
 
-  persistPause(id: string, actor: Actor, kind: "paused" | "budget_paused"): void {
+  persistPause(id: string, actor: Actor, kind: "paused" | "budget_paused" | "awaiting_verify"): void {
     this.store.transaction(() => {
       const camp = this.getCampaign(id);
       transitionCampaign(camp.state, kind);
@@ -254,6 +260,9 @@ export class StorageService {
       if (camp.state === "cancelled") {
         throw denied("cancelled_no_autoresume", "cancelled campaigns do not auto-resume");
       }
+      if (camp.state === "awaiting_verify") {
+        throw denied("awaiting_human_verify", "use verify-goal --accept or --reject, not resume");
+      }
       transitionCampaign(camp.state, "active");
       this.store.db
         .prepare("UPDATE campaigns SET state = ?, admission_open = 1, epoch = epoch + 1, updated_at = ? WHERE id = ?")
@@ -269,6 +278,87 @@ export class StorageService {
       this.markRequested(id, seq);
       this.store.db.prepare("UPDATE campaigns SET epoch = epoch + 1, updated_at = ? WHERE id = ?").run(nowIso(), id);
       return this.getCampaign(id).epoch;
+    });
+  }
+
+  pendingGoalClaim(campaignId: string): { id: string; proposition: string; fact_key: string } | null {
+    const key = this.getCampaign(campaignId).spec.root_goal.success_predicate_ref;
+    if (!key || key === "sample_recovered") return null;
+    const row = this.store.db
+      .prepare(
+        "SELECT id, proposition, fact_key FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed' AND validity = 'current' ORDER BY created_seq DESC LIMIT 1",
+      )
+      .get(campaignId, key) as { id: string; proposition: string; fact_key: string } | undefined;
+    return row ?? null;
+  }
+
+  acceptGoalClaim(campaignId: string, factId: string, actor: Actor): void {
+    this.store.transaction(() => {
+      const camp = this.getCampaign(campaignId);
+      const key = camp.spec.root_goal.success_predicate_ref;
+      const row = this.store.db
+        .prepare("SELECT id, fact_key, epistemic_status FROM facts WHERE id = ? AND campaign_id = ?")
+        .get(factId, campaignId) as { id: string; fact_key: string | null; epistemic_status: string } | undefined;
+      if (!row || row.fact_key !== key) {
+        throw invalidInput("not_goal_claim", "fact is not the campaign success predicate");
+      }
+      const seq = this.appendEvent(campaignId, "control.changed", { command: "goal_verdict", verdict: "accepted", fact_id: factId }, actor);
+      this.store.db
+        .prepare(
+          "UPDATE facts SET epistemic_status = 'accepted', source_grade = 'verified', validity = 'current', revision = revision + 1, updated_seq = ? WHERE id = ?",
+        )
+        .run(seq, factId);
+      this.store.db
+        .prepare(
+          "UPDATE facts SET epistemic_status = 'disputed', validity = 'stale', revision = revision + 1 WHERE campaign_id = ? AND fact_key = ? AND id != ? AND epistemic_status = 'proposed'",
+        )
+        .run(campaignId, key, factId);
+      this.bumpProgress(campaignId);
+    });
+  }
+
+  rejectGoalClaim(campaignId: string, text: string, actor: Actor, factId?: string): { proposition: string } {
+    return this.store.transaction(() => {
+      const camp = this.getCampaign(campaignId);
+      const key = camp.spec.root_goal.success_predicate_ref;
+      const target =
+        factId ??
+        (this.store.db
+          .prepare(
+            "SELECT id FROM facts WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed' ORDER BY created_seq DESC LIMIT 1",
+          )
+          .get(campaignId, key) as { id: string } | undefined)?.id;
+      if (!target) throw invalidInput("no_goal_claim", "no pending success-predicate fact to reject");
+      const row = this.store.db
+        .prepare("SELECT proposition FROM facts WHERE id = ? AND campaign_id = ?")
+        .get(target, campaignId) as { proposition: string } | undefined;
+      if (!row) throw invalidInput("no_goal_claim", "pending fact missing");
+      this.store.db
+        .prepare(
+          "UPDATE facts SET epistemic_status = 'disputed', validity = 'stale', revision = revision + 1 WHERE campaign_id = ? AND fact_key = ? AND epistemic_status = 'proposed'",
+        )
+        .run(campaignId, key);
+      const hint = text.trim()
+        ? `Human rejected the submitted flag. It is incorrect. Submitted claim: ${row.proposition}. ${text.trim()} Do not resubmit this value. Continue searching.`
+        : `Human rejected the submitted flag. It is incorrect. Submitted claim: ${row.proposition}. Do not resubmit this value. Continue searching.`;
+      const seq = this.appendEvent(
+        campaignId,
+        "control.changed",
+        { command: "hint", text: hint, verdict: "rejected", fact_id: target },
+        actor,
+      );
+      this.markRequested(campaignId, seq);
+      this.bumpProgress(campaignId);
+      if (camp.state === "awaiting_verify") {
+        transitionCampaign(camp.state, "active");
+        this.store.db
+          .prepare("UPDATE campaigns SET state = ?, admission_open = 1, epoch = epoch + 1, updated_at = ? WHERE id = ?")
+          .run("active", nowIso(), campaignId);
+        this.appendEvent(campaignId, "campaign.state_changed", { from: camp.state, to: "active" }, actor);
+      } else {
+        this.store.db.prepare("UPDATE campaigns SET epoch = epoch + 1, updated_at = ? WHERE id = ?").run(nowIso(), campaignId);
+      }
+      return { proposition: row.proposition };
     });
   }
 
@@ -633,7 +723,9 @@ export class StorageService {
       const id = newId("fact");
       let epistemic: EpistemicStatus = "accepted";
       let submitStatus: SubmitFactResultStatus = "accepted_as_observation";
-      if (grade === "derived") {
+      const successKey = this.getCampaign(args.campaign_id).spec.root_goal.success_predicate_ref;
+      const isGoalClaim = Boolean(args.fact_key && args.fact_key === successKey && successKey !== "sample_recovered");
+      if (grade === "derived" || isGoalClaim) {
         epistemic = "proposed";
         submitStatus = "pending_verification";
       }
@@ -1047,7 +1139,9 @@ export class StorageService {
         }
       }
       this.appendEvent(campaignId, "run.finished", { run_id: runId, outcome }, { kind: "controller", id: "engine" }, runId);
-      this.markRequested(campaignId, this.getCampaign(campaignId).event_head);
+      if (run.mode !== "decide") {
+        this.markRequested(campaignId, this.getCampaign(campaignId).event_head);
+      }
     });
   }
 

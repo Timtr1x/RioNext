@@ -83,6 +83,7 @@ export function createToolStream(
   model: Model<string>,
   calls: ScriptedToolCall[],
   reason: "toolUse" | "length",
+  usage?: Partial<Usage>,
 ): AssistantMessageEventStream {
   const content = calls.map((c, i) => ({
     type: "toolCall" as const,
@@ -90,7 +91,7 @@ export function createToolStream(
     name: c.name,
     arguments: c.arguments,
   }));
-  const msg = baseAssistant(model, content, reason);
+  const msg = baseAssistant(model, content, reason, undefined, usage);
   return emit(msg, reason);
 }
 

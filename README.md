@@ -11,19 +11,28 @@ Node >= 22.19.0 (developed on 24.12.0).
 ```
 npm install
 npm test
-node dist/src/cli/index.js run --spec profiles/demo-lab.json
+npx rionext run --spec profiles/demo-lab.json
 ```
 
-`--data-dir` 默认 `.rionext`。槽位配好供应商之后，这条命令会创建战役（已存在就接着跑）并启动 Decide/Execute。`thinking_level` 默认 `high`。
+Windows 也可以用仓库里的 `.\rionext`。`--data-dir` 默认 `.rionext`。只有一个战役时可以省略 id。
+
+```
+npx rionext list
+npx rionext status
+npx rionext accept
+npx rionext reject --text "flag不正确" --continue
+```
+
+`run --spec` 会创建战役（已存在就接着跑）并启动 Decide/Execute。命中根目标的 flag 会停在 `awaiting_verify`，人审 `accept` 才算完成。`thinking_level` 默认 `high`。
 
 ## Providers
 
 ```
-node dist/src/cli/index.js provider add --name "Anthropic" --protocol ANTHROPIC_MESSAGES --base-url https://api.anthropic.com --api-key $KEY --data-dir .rionext
-node dist/src/cli/index.js provider model add --provider prv_... --name claude-sonnet-4-6 --context 256000 --max-output 51200 --data-dir .rionext
-node dist/src/cli/index.js provider test --provider prv_... --model claude-sonnet-4-6 --data-dir .rionext
-node dist/src/cli/index.js provider slots --solver mdl_... --visual mdl_... --reflect none --data-dir .rionext
-node dist/src/cli/index.js provider ui --port 7780 --data-dir .rionext
+npx rionext provider add --name "Anthropic" --protocol ANTHROPIC_MESSAGES --base-url https://api.anthropic.com --api-key $KEY
+npx rionext provider model add --provider prv_... --name claude-sonnet-4-6 --context 256000 --max-output 51200
+npx rionext provider test --provider prv_... --model claude-sonnet-4-6
+npx rionext provider slots --solver mdl_... --visual mdl_... --reflect none
+npx rionext provider ui --port 7780
 ```
 
 Test connection returns auth / text / tools / vision. Vision sends a PNG that contains `RIO-VISION-PROBE-7F3A`. `analyze_visual` refuses models with `vision=false`. Empty slots fall back to 主求解, then the first available model.

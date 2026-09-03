@@ -9,8 +9,8 @@ import { DomainError } from "../../src/domain/errors.ts";
 import { loadKaliSpec } from "../../src/eval/helpers.ts";
 import { FakeDockerCli, ProcessDockerCli } from "../../src/tools/docker-cli.ts";
 import { checkEgress, checkRedirect, isLoopbackHost, parseAllowList, parseDestination } from "../../src/tools/egress.ts";
-import { assertKaliArgv, KALI_KEEPER_NAME, workspaceRelPath } from "../../src/tools/kali-profile.ts";
-import { buildContainerSpec, KaliRuntime, containerName } from "../../src/tools/kali-runtime.ts";
+import { assertKaliArgv, KALI_KEEPER_NAME, shouldBackgroundKali, workspaceRelPath } from "../../src/tools/kali-profile.ts";
+import { buildContainerSpec, kaliEntrypointHost, KaliRuntime, containerName } from "../../src/tools/kali-runtime.ts";
 import type { RunLease } from "../../src/domain/types.ts";
 
 function tmp(): string {
@@ -52,6 +52,27 @@ test("K05 container spec mounts only workspace, never db/secrets/artifacts", () 
   assert.equal(spec.env.RIONEXT_CAMPAIGN, "c1");
   assert.equal("OPENAI_API_KEY" in spec.env, false);
   assert.equal("ANTHROPIC_API_KEY" in spec.env, false);
+});
+
+test("campaign clone overlays host entrypoint; does not rebuild the master image", () => {
+  const dir = tmp();
+  const spec = buildContainerSpec({
+    campaignId: "c-overlay",
+    workspaceHost: join(dir, "workspace", "c-overlay"),
+    dbPath: join(dir, "rionext.sqlite"),
+    secretsPath: join(dir, "provider-secrets.json"),
+    artifactRoot: join(dir, "artifacts"),
+    dataDir: dir,
+    allowAssets: [],
+    network: "none",
+  });
+  const host = kaliEntrypointHost();
+  assert.ok(host, "docker/kali/entrypoint.sh must be on disk");
+  assert.ok(spec.argv.some((a) => a.endsWith("rionext-entrypoint:ro")));
+  assert.ok(spec.argv.includes("--entrypoint"));
+  assert.ok(spec.argv.includes("/bin/sh"));
+  assert.ok(spec.argv.includes("/usr/local/bin/rionext-entrypoint"));
+  assert.deepEqual(spec.mounts.map((m) => m.container), ["/workspace"]);
 });
 
 test("K11 container env does not copy host secrets", () => {
@@ -512,6 +533,41 @@ test("K08 successful kali dispatch releases locks so the next call can run", () 
   });
   assert.equal(again.status, "sent");
   e.close();
+});
+
+test("bash and curl stay synchronous even when timeout_ms exceeds 60s", () => {
+  assert.equal(shouldBackgroundKali("bash", 180_000), false);
+  assert.equal(shouldBackgroundKali("curl", 240_000), false);
+  assert.equal(shouldBackgroundKali("python3", 600_000), false);
+  assert.equal(shouldBackgroundKali("nmap", 30_000), true);
+  const docker = new FakeDockerCli();
+  docker.next = { stdout: "ok", stderr: "", code: 0, timedOut: false };
+  const rt = new KaliRuntime(docker);
+  const dir = tmp();
+  const r = rt.exec(
+    {
+      campaignId: "c-sync",
+      workspaceHost: join(dir, "ws"),
+      dbPath: join(dir, "db.sqlite"),
+      secretsPath: join(dir, "secrets.json"),
+      artifactRoot: join(dir, "art"),
+      dataDir: dir,
+      allowAssets: [],
+      network: "none",
+    },
+    "bash",
+    ["/workspace/probe.sh"],
+    { timeout_ms: 180_000 },
+  );
+  assert.equal(r.pending, undefined);
+  assert.equal(r.code, 0);
+  assert.equal(
+    docker.calls.some((c) => c[0] === "exec" && c.includes("-d")),
+    false,
+  );
+  const exec = docker.calls.find((c) => c[0] === "exec");
+  assert.ok(exec);
+  assert.ok(exec.includes("180"));
 });
 
 test("nmap is detached so dispatch does not wait, then poll ingests when exit file appears", async () => {

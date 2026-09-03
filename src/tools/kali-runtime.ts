@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.ts";
 import type { DockerCli, DockerExecResult } from "./docker-cli.ts";
 import { ProcessDockerCli } from "./docker-cli.ts";
@@ -47,6 +48,21 @@ export function dockerVolumePath(hostPath: string): string {
   const m = n.match(/^([A-Za-z]):(.*)$/);
   if (m) return `/${m[1]!.toLowerCase()}${m[2]}`;
   return n;
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+/** Host entrypoint overlay. Avoids rebuilding the 12.9GB master for script-only fixes. */
+export function kaliEntrypointHost(): string | undefined {
+  const candidates = [
+    join(process.cwd(), "docker/kali/entrypoint.sh"),
+    join(here, "../../../docker/kali/entrypoint.sh"),
+    join(here, "../../../../docker/kali/entrypoint.sh"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return undefined;
 }
 
 function forbiddenMount(host: string, forbidden: string[]): boolean {
@@ -107,6 +123,12 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
     "-v",
     `${workspace}:/workspace:rw`,
   ];
+  const entrypointHost = kaliEntrypointHost();
+  if (entrypointHost) {
+    argv.push("-v", `${dockerVolumePath(entrypointHost)}:/usr/local/bin/rionext-entrypoint:ro`);
+    // Windows bind mounts often lack +x; sh can still run the overlay.
+    argv.push("--entrypoint", "/bin/sh");
+  }
   const network = opts.network === "none" ? "none" : "bridge";
   argv.push("--network", network);
   if (opts.network === "allowlist") {
@@ -118,7 +140,11 @@ export function buildContainerSpec(opts: KaliStartOpts): ContainerSpec {
   }
   argv.push("--label", `rionext.campaign=${opts.campaignId}`);
   argv.push("--label", "rionext.from=master");
-  argv.push(opts.image ?? KALI_IMAGE, "sleep", "infinity");
+  if (entrypointHost) {
+    argv.push(opts.image ?? KALI_IMAGE, "/usr/local/bin/rionext-entrypoint", "sleep", "infinity");
+  } else {
+    argv.push(opts.image ?? KALI_IMAGE, "sleep", "infinity");
+  }
   assertNoSecretEnv(env);
   assertMountsSafe(mounts, forbidden);
   return { name, argv, mounts, env, network, image: opts.image ?? KALI_IMAGE };
@@ -270,7 +296,17 @@ export class KaliRuntime {
     if (created.code !== 0) {
       throw new DomainError("kali_start", created.stderr || "docker run failed", "protocol_error");
     }
-    return spec;
+    for (let i = 0; i < 25; i++) {
+      const ready = this.docker.run(["inspect", "-f", "{{.State.Running}}", spec.name], { timeoutMs: 5_000 });
+      if (ready.code === 0 && ready.stdout.trim() === "true") return spec;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+    const died = this.docker.run(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", spec.name], { timeoutMs: 5_000 });
+    throw new DomainError(
+      "kali_start",
+      `campaign container ${spec.name} exited before exec (${died.stdout.trim() || "missing"})`,
+      "protocol_error",
+    );
   }
 
   exec(

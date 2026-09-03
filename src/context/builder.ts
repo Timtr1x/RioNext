@@ -55,6 +55,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
     },
     graph: { facts: facts.items, steps: steps.items, goals: goals.items, findings: findings.items, coverage: coverage.items, observations: observations.items },
     hints,
+    pending_goal_claim: storage.pendingGoalClaim(lease.campaign_id),
     checkpoint,
     omitted: [facts, steps, goals, findings, coverage, observations].filter((g) => g.truncated).map((g) => ({ truncated: true })),
     ...extra,

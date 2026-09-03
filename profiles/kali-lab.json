@@ -44,8 +44,8 @@
     "currency": "USD",
     "price_version": "unknown",
     "max_cost_micro": null,
-    "max_tokens": 100000,
-    "max_calls": 240,
+    "max_tokens": 10000000,
+    "max_calls": 1000,
     "deadline_ms": null
   },
   "verification_policy": {

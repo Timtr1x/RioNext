@@ -208,18 +208,27 @@ export class PiWorker implements WorkerRuntime {
         const result = s.graphQuery(lease.campaign_id, params as { entity: string; limit?: number; offset?: number });
         return ok(result);
       }),
-      tool("artifact_read", "Read artifact slice", Type.Object({
+      tool("artifact_read", "Read a byte slice of a saved original. If kali_run set truncated, pass artifact_id and next_offset to get the next chunk.", Type.Object({
         artifact_id: Type.String(),
         offset: Type.Optional(Type.Number()),
         length: Type.Optional(Type.Number()),
       }), async (_id, params) => {
-        const p = params as { artifact_id: string };
+        const p = params as { artifact_id: string; offset?: number; length?: number };
         const row = s.store.db.prepare("SELECT * FROM artifacts WHERE id = ? AND campaign_id = ?").get(p.artifact_id, lease.campaign_id) as
-          | { path: string; hash: string }
+          | { path: string; hash: string; size: number }
           | undefined;
         if (!row) throw new Error("artifact not in campaign");
-        const buf = await s.artifacts.read(row.path, (params as { offset?: number }).offset ?? 0, (params as { length?: number }).length);
-        return ok({ text: buf.toString("utf8").slice(0, 8192), hash: row.hash, derived: false });
+        const offset = Math.max(0, p.offset ?? 0);
+        const want = Math.min(ARTIFACT_SLICE_MAX, Math.max(1, p.length ?? ARTIFACT_SLICE_MAX));
+        const buf = await s.artifacts.read(row.path, offset, want);
+        return ok(artifactSlicePayload({
+          text: buf.toString("utf8"),
+          byte_length: buf.length,
+          offset,
+          total: Number(row.size),
+          artifact_id: p.artifact_id,
+          hash: row.hash,
+        }));
       }),
       tool("checkpoint", "Save checkpoint", Type.Object({
         note: Type.String(),
@@ -298,7 +307,7 @@ export class PiWorker implements WorkerRuntime {
           this.recordSubmit("obs", result.canonical_ids.observation_id);
           return ok(result);
         }),
-        tool("submit_fact", "Submit fact claim", Type.Object({
+        tool("submit_fact", "Submit a fact. A success-predicate fact (e.g. flag_recovered) is only a candidate until a human verifies it.", Type.Object({
           proposition: Type.String(),
           fact_key: Type.Optional(Type.String()),
           support_refs: Type.Array(Type.String()),
@@ -403,14 +412,14 @@ export class PiWorker implements WorkerRuntime {
           redirects: Type.Optional(Type.Array(Type.String())),
           timeout_ms: Type.Optional(Type.Number()),
         }), async (_id, _params) => {
-          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_kali_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_result"));
         }),
         tool("kali_write", "Write a script or payload file into the campaign container workspace (/workspace)", Type.Object({
           kind: Type.Literal("kali_write"),
           path: Type.String({ description: "Relative path under /workspace, e.g. payloads/xss.html" }),
           content: Type.String(),
         }), async (_id, _params) => {
-          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_kali_write_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_kali_write_result"));
         }),
         tool("playwright", "Operate the persistent Playwright Chromium in the Kali container (goto/snapshot/click/type/press/screenshot/content/wait/back/status). Use snapshot refs for click/type.", Type.Object({
           kind: Type.Literal("playwright"),
@@ -423,7 +432,7 @@ export class PiWorker implements WorkerRuntime {
           timeout_ms: Type.Optional(Type.Number()),
           redirects: Type.Optional(Type.Array(Type.String())),
         }), async (_id, _params) => {
-          return ok(decodeExec(this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
+          return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
         }),
         tool("finish_step", "Finish execute fragment", Type.Object({
           reason: Type.String(),
@@ -467,25 +476,82 @@ function ok(details: unknown): { content: { type: "text"; text: string }[]; deta
   return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 }
 
-function decodeExec(
+export const TOOL_STDOUT_PREVIEW = 8000;
+export const TOOL_STDERR_PREVIEW = 2000;
+export const ARTIFACT_SLICE_MAX = 8192;
+
+async function packKaliExec(
+  storage: StorageService,
+  lease: RunLease,
+  last: { stdout: string; stderr: string; code: number; timedOut: boolean; truncated: boolean; container: string } | undefined,
+  empty: string,
+): Promise<unknown> {
+  if (!last) return { error: empty };
+  const stored = await storage.putArtifact(lease.campaign_id, last.stdout ?? "", "text/plain", lease.run_id);
+  return decodeExec(last, empty, { id: stored.id, size: stored.size });
+}
+
+export function decodeExec(
   result: { stdout: string; stderr: string; code: number; timedOut: boolean; truncated: boolean; container: string } | undefined,
   empty: string,
+  art?: { id: string; size: number },
 ): unknown {
   if (!result) return { error: empty };
   const stdout = result.stdout ?? "";
-  let parsed: unknown = stdout.slice(0, 8000);
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    // raw text from nmap/curl
-  }
-  return {
+  const stderr = result.stderr ?? "";
+  const stdoutBuf = Buffer.from(stdout, "utf8");
+  const stderrBuf = Buffer.from(stderr, "utf8");
+  const previewCut = stdoutBuf.length > TOOL_STDOUT_PREVIEW;
+  const stderrCut = stderrBuf.length > TOOL_STDERR_PREVIEW;
+  const truncated = Boolean(result.truncated || previewCut || stderrCut);
+  const shownBuf = stdoutBuf.subarray(0, TOOL_STDOUT_PREVIEW);
+  const shown = shownBuf.toString("utf8");
+  const out: Record<string, unknown> = {
     code: result.code,
-    truncated: result.truncated,
+    truncated,
+    preview_truncated: previewCut,
+    output_capped: Boolean(result.truncated),
     container: result.container,
     timedOut: result.timedOut,
-    stderr: (result.stderr ?? "").slice(0, 2000),
-    result: parsed,
+    stdout_bytes: stdoutBuf.length,
+    shown_bytes: shownBuf.length,
+    stderr: stderrBuf.subarray(0, TOOL_STDERR_PREVIEW).toString("utf8"),
+    result: shown,
+  };
+  if (art) {
+    out.artifact_id = art.id;
+    out.artifact_bytes = art.size;
+  }
+  if (truncated) {
+    const next = previewCut ? shownBuf.length : null;
+    out.next_offset = next;
+    out.remaining_bytes = Math.max(0, (art?.size ?? stdoutBuf.length) - shownBuf.length);
+    if (art && next != null) {
+      out.read_next = `artifact_read artifact_id=${art.id} offset=${next} length=${TOOL_STDOUT_PREVIEW}`;
+    }
+  }
+  return out;
+}
+
+export function artifactSlicePayload(args: {
+  text: string;
+  byte_length: number;
+  offset: number;
+  total: number;
+  artifact_id: string;
+  hash: string;
+}): Record<string, unknown> {
+  const more = args.offset + args.byte_length < args.total;
+  return {
+    text: args.text,
+    artifact_id: args.artifact_id,
+    hash: args.hash,
+    derived: false,
+    offset: args.offset,
+    length: args.byte_length,
+    total: args.total,
+    truncated: more,
+    next_offset: more ? args.offset + args.byte_length : null,
   };
 }
 

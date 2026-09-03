@@ -11,7 +11,7 @@ import { testConnection } from "../../src/provider/probe.ts";
 import { resolveSlot, resolveVisionRoute } from "../../src/provider/router.ts";
 import { createCataloguedProviderStream } from "../../src/provider/stream.ts";
 import { buildProtocolBody, extractToolCall } from "../../src/provider/transform.ts";
-import { OUTPUT_DEFAULT } from "../../src/provider/types.ts";
+import { OUTPUT_DEFAULT, STREAM_TIMEOUT_DEFAULT_MS } from "../../src/provider/types.ts";
 import { SCRIPTED_MODEL } from "../../src/runtime/pi/scripted-stream.ts";
 import { generateVisionProbePng, VISION_PHRASE, visionPassed } from "../../src/provider/visual-runtime.ts";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
@@ -270,6 +270,7 @@ test("extractToolCall sees anthropic tool_use", () => {
 
 test("campaign catalogued stream uses model max_output default 51200", async () => {
   assert.equal(OUTPUT_DEFAULT, 51_200);
+  assert.equal(STREAM_TIMEOUT_DEFAULT_MS, 600_000);
   const cat = new ProviderCatalog(dir());
   const p = cat.addProvider({
     display_name: "qianfan",

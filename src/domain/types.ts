@@ -8,6 +8,7 @@ export type CampaignState =
   | "plateau"
   | "budget_paused"
   | "paused"
+  | "awaiting_verify"
   | "closing"
   | "completed"
   | "cancelled";
@@ -354,12 +355,13 @@ export interface RunLease {
 
 export const CAMPAIGN_TRANSITIONS: Record<CampaignState, CampaignState[]> = {
   created: ["active", "paused", "cancelled"],
-  active: ["waiting", "blocked", "plateau", "budget_paused", "paused", "closing", "cancelled"],
-  waiting: ["active", "blocked", "plateau", "budget_paused", "paused", "closing", "cancelled"],
+  active: ["waiting", "blocked", "plateau", "budget_paused", "paused", "awaiting_verify", "closing", "cancelled"],
+  waiting: ["active", "blocked", "plateau", "budget_paused", "paused", "awaiting_verify", "closing", "cancelled"],
   blocked: ["active", "waiting", "plateau", "paused", "closing", "cancelled"],
   plateau: ["active", "paused", "cancelled", "closing"],
-  budget_paused: ["active", "paused", "cancelled"],
+  budget_paused: ["active", "paused", "awaiting_verify", "cancelled"],
   paused: ["active", "cancelled"],
+  awaiting_verify: ["active", "paused", "closing", "cancelled"],
   closing: ["completed", "active", "cancelled"],
   completed: [],
   cancelled: [],

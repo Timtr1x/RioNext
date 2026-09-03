@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { Engine, openEngine } from "../../src/controller/engine.ts";
+import { DomainError } from "../../src/domain/errors.ts";
 import { evaluateCompletion } from "../../src/domain/completion.ts";
 import { ModelGateway } from "../../src/gateway/gateways.ts";
 import { InvocationBook } from "../../src/gateway/invocation.ts";
@@ -12,7 +13,7 @@ import { ProviderCatalog } from "../../src/provider/catalog.ts";
 import { createCataloguedProviderStream } from "../../src/provider/stream.ts";
 import { pickFairReadyStep } from "../../src/scheduler/fair.ts";
 import { SCRIPTED_MODEL } from "../../src/runtime/pi/scripted-stream.ts";
-import { buildContextPack } from "../../src/context/builder.ts";
+import { buildContextPack, loadPrompt } from "../../src/context/builder.ts";
 import { inspectWorld, freshWorld } from "../../src/tools/synthetic.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
 import { confirmFindingIfCurrent } from "../../src/verification/verdict.ts";
@@ -102,7 +103,7 @@ test("model settle uses reserved tokens so the reserved bucket does not go negat
   const snap = e.budget.snapshot("bgt-settle");
   assert.equal(Number(snap.reserved_tokens) >= 0, true);
   assert.equal(Number(snap.spent_tokens), 18);
-  assert.equal(Number(snap.free_tokens), 100000 - 18);
+  assert.equal(Number(snap.free_tokens), Number(snap.total_tokens) - 18);
   e.close();
 });
 
@@ -422,6 +423,34 @@ test("derived facts do not bump progress_epoch", () => {
   e.close();
 });
 
+test("incomplete decide does not spin a tight empty loop", async () => {
+  const dir = tmp();
+  const e = new Engine(makeRuntimeConfig(dir), {
+    silent: true,
+    maxCycles: 80,
+    chooseDecide: () => ({ type: "text", text: "no finish_decision" }),
+    chooseExecute: () => ({ type: "text", text: "no finish_step" }),
+  });
+  const spec = loadDemoSpec("empty-decide");
+  e.createCampaign(spec);
+  e.hint("empty-decide", "nudge");
+  await e.start("empty-decide");
+  const n = Number(
+    (e.storage.store.db.prepare("SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'decide'").get("empty-decide") as { c: number }).c,
+  );
+  assert.equal(n, 1);
+  e.close();
+});
+
+test("execute prompt forbids container php as unserialize oracle", () => {
+  const prompt = loadPrompt("execute");
+  assert.match(prompt, /活靶/);
+  assert.match(prompt, /unserialize/);
+  assert.match(prompt, /容器/);
+  assert.match(prompt, /artifact_read/);
+  assert.match(prompt, /truncated/);
+});
+
 test("hints land in the next context pack", () => {
   const dir = tmp();
   const e = boot(dir, "hint-ctx");
@@ -466,4 +495,100 @@ test("inspectWorld does not leak hidden sample_id on desk inspect", () => {
   const r = inspectWorld(freshWorld(), "desk");
   assert.equal(JSON.stringify(r.observation).includes("SAMPLE-42"), false);
   assert.equal(r.world.sample_id, "SAMPLE-42");
+});
+
+test("success-predicate fact stays pending until a human accepts or rejects it", async () => {
+  const dir = tmp();
+  const spec = loadDemoSpec("goal-human");
+  spec.root_goal = { ...spec.root_goal, success_predicate_ref: "flag_recovered" };
+  const e = new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 2 });
+  e.createCampaign(spec);
+  e.storage.setCampaignState("goal-human", "active", { kind: "user", id: "t" });
+  const run = e.storage.claimDecide("goal-human", "t")!;
+  const obs = e.storage.recordObservation({
+    campaign_id: "goal-human",
+    producer_id: "p",
+    submission_id: "o1",
+    run_id: run.run_id,
+    attempt_id: run.run_id,
+    subject: "http-body",
+    body: { text: "CTF2{fake}" },
+    artifact_refs: [],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  e.storage.submitFact({
+    campaign_id: "goal-human",
+    producer_id: "p",
+    submission_id: "f1",
+    run_id: run.run_id,
+    proposition: "CTF2{fake}",
+    fact_key: "flag_recovered",
+    support_refs: [obs.canonical_ids.observation_id!],
+    conditions: {},
+    source_grade: "observed",
+  });
+  const first = e.storage.list("facts", "goal-human")[0]!;
+  assert.equal(first.epistemic_status, "proposed");
+  assert.equal(first.source_grade, "observed");
+  assert.ok(e.storage.pendingGoalClaim("goal-human"));
+  e.storage.finishRun("goal-human", run.run_id, {
+    run_id: run.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "submitted candidate",
+    observation_ids: [],
+    fact_ids: [String(first.id)],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  await e.runLoop("goal-human");
+  assert.equal(e.storage.getCampaign("goal-human").state, "awaiting_verify");
+  assert.throws(
+    () => e.resume("goal-human"),
+    (err: unknown) => err instanceof DomainError && err.code === "awaiting_human_verify",
+  );
+  const rejected = e.verifyGoal("goal-human", { accept: false, text: "flag不正确" });
+  assert.equal(rejected.state, "active");
+  assert.equal(e.storage.list("facts", "goal-human")[0]!.epistemic_status, "disputed");
+  assert.equal(e.storage.pendingGoalClaim("goal-human"), null);
+  const pack = buildContextPack(e.storage, {
+    run_id: run.run_id,
+    campaign_id: "goal-human",
+    step_id: null,
+    mode: "execute",
+    kind: "explore",
+    attempt_no: 1,
+    fence: run.fence,
+    cancel_epoch: 0,
+    deadline_ms: Date.now() + 1000,
+    lease_owner: "t",
+    continuation_of: null,
+  });
+  const blob = JSON.stringify(pack.user_payload);
+  assert.equal(blob.includes("flag不正确"), true);
+  assert.equal(blob.includes("CTF2{fake}"), true);
+  e.storage.submitFact({
+    campaign_id: "goal-human",
+    producer_id: "p",
+    submission_id: "f2",
+    run_id: run.run_id,
+    proposition: "CTF2{real}",
+    fact_key: "flag_recovered",
+    support_refs: [obs.canonical_ids.observation_id!],
+    conditions: {},
+    source_grade: "observed",
+  });
+  await e.runLoop("goal-human");
+  assert.equal(e.storage.getCampaign("goal-human").state, "awaiting_verify");
+  const accepted = e.verifyGoal("goal-human", { accept: true });
+  assert.equal(accepted.state, "completed");
+  const kept = e.storage.list("facts", "goal-human").find((f) => String(f.proposition) === "CTF2{real}")!;
+  assert.equal(kept.epistemic_status, "accepted");
+  assert.equal(kept.source_grade, "verified");
+  e.close();
 });

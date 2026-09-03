@@ -132,9 +132,10 @@ export function isKaliProfile(profile: string): boolean {
   return profile === "kali" || profile === "docker-kali";
 }
 
-export function shouldBackgroundKali(bin: string, timeoutMs?: number): boolean {
-  if (KALI_BACKGROUND_BINS.has(bin)) return true;
-  return typeof timeoutMs === "number" && timeoutMs > DEFAULT_KALI_LIMITS.maxRuntimeMs;
+export function shouldBackgroundKali(bin: string, _timeoutMs?: number): boolean {
+  // Only scanners detach. bash/curl with a large timeout_ms stay in-process so
+  // stdout returns on the same tool call instead of locking the campaign clone.
+  return KALI_BACKGROUND_BINS.has(bin);
 }
 
 export function assertKaliArgv(bin: string, args: string[]): void {

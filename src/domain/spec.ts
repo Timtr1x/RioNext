@@ -2,6 +2,9 @@ import { SCHEMA_VERSION } from "../version.ts";
 import { invalidInput } from "./errors.ts";
 import type { CampaignSpec, CampaignState } from "./types.ts";
 
+export const DEFAULT_MAX_CALLS = 1000;
+export const DEFAULT_MAX_TOKENS = 10_000_000;
+
 export const ALLOWED_MODELS = new Set(["scripted", "scripted-react"]);
 export const ALLOWED_PROVIDERS = new Set(["scripted"]);
 export const ALLOWED_STATES = new Set<CampaignState>([
@@ -12,6 +15,7 @@ export const ALLOWED_STATES = new Set<CampaignState>([
   "plateau",
   "budget_paused",
   "paused",
+  "awaiting_verify",
   "closing",
   "completed",
   "cancelled",
@@ -49,8 +53,8 @@ export function validateCampaignSpec(input: unknown): CampaignSpec {
     currency: optionalString(budgetRaw, "currency") ?? "USD",
     price_version: optionalString(budgetRaw, "price_version") ?? "unknown",
     max_cost_micro: optionalIntOrNull(budgetRaw, "max_cost_micro"),
-    max_tokens: optionalIntOrNull(budgetRaw, "max_tokens"),
-    max_calls: optionalIntOrNull(budgetRaw, "max_calls"),
+    max_tokens: "max_tokens" in budgetRaw ? optionalIntOrNull(budgetRaw, "max_tokens") : DEFAULT_MAX_TOKENS,
+    max_calls: "max_calls" in budgetRaw ? optionalIntOrNull(budgetRaw, "max_calls") : DEFAULT_MAX_CALLS,
     deadline_ms: optionalIntOrNull(budgetRaw, "deadline_ms"),
   };
   if (budget.max_cost_micro !== null && budget.max_cost_micro < 0) {
