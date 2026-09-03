@@ -6,7 +6,7 @@ import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
 import { HELP, flagString, parseArgs, resolveCampaignId } from "./args.ts";
-import { formatList, formatStatus, formatVerify } from "./format.ts";
+import { formatList, formatProgress, formatStatus, formatVerify } from "./format.ts";
 import { handleKaliCommand } from "./kali.ts";
 import { handleProviderCommand } from "./providers.ts";
 
@@ -14,6 +14,38 @@ function dataDir(flags: Record<string, string | boolean>): string {
   if (typeof flags["data-dir"] === "string") return resolve(flags["data-dir"]);
   if (process.env.RIONEXT_DATA) return resolve(process.env.RIONEXT_DATA);
   return resolve(process.cwd(), ".rionext");
+}
+
+const DEFAULT_PROGRESS_MS = 300_000;
+
+function progressMs(flags: Record<string, string | boolean>): number {
+  if (flags["progress-ms"] === undefined) return DEFAULT_PROGRESS_MS;
+  const n = Number(flags["progress-ms"]);
+  return Number.isFinite(n) ? n : DEFAULT_PROGRESS_MS;
+}
+
+function startProgressLog(engine: Engine, id: string, intervalMs: number): () => void {
+  if (intervalMs <= 0) return () => {};
+  const tick = (): void => {
+    try {
+      console.log(formatProgress(new Date().toISOString(), engine.status(id), engine.storage.recentInvocations(id, 6)));
+    } catch {
+      // campaign row may not exist yet
+    }
+  };
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+async function runCampaign(engine: Engine, id: string, flags: Record<string, string | boolean>, json: boolean): Promise<void> {
+  const stop = json ? () => {} : startProgressLog(engine, id, progressMs(flags));
+  try {
+    await engine.start(id);
+  } finally {
+    stop();
+  }
 }
 
 function emit(obj: unknown, json: boolean, text?: string): void {
@@ -110,7 +142,7 @@ async function main(): Promise<void> {
       }
       const id = typeof spec.campaign_id === "string" ? spec.campaign_id : "";
       if (!id) throw new Error("spec.campaign_id is required");
-      await engine.start(id);
+      await runCampaign(engine, id, flags, json);
       const st = engine.status(id);
       emit({ created, id, ...st }, json, formatStatus(st));
       return;
@@ -139,7 +171,7 @@ async function main(): Promise<void> {
     const id = needsId ? resolveCampaignId(flags, positional, engine.listCampaigns()) : "";
     switch (cmd) {
       case "start": {
-        await engine.start(id);
+        await runCampaign(engine, id, flags, json);
         const st = engine.status(id);
         emit(st, json, formatStatus(st));
         break;
@@ -198,7 +230,7 @@ async function main(): Promise<void> {
         });
         emit(result, json, formatVerify(result, id, accept));
         if (!accept && flags.continue) {
-          await engine.start(id);
+          await runCampaign(engine, id, flags, json);
           const st = engine.status(id);
           emit(st, json, formatStatus(st));
         }

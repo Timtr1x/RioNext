@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
-import { formatList, formatStatus, formatVerify } from "../../src/cli/format.ts";
+import { formatList, formatProgress, formatStatus, formatVerify } from "../../src/cli/format.ts";
 
 test("parseArgs treats accept/reject as commands and keeps positional id", () => {
   const a = parseArgs(["accept", "camp_x"]);
@@ -55,4 +55,27 @@ test("formatList and formatVerify are operator text, not JSON", () => {
   const rej = formatVerify({ state: "active", proposition: "CTF2{x}" }, "camp_b", false);
   assert.match(rej, /rejected/);
   assert.match(rej, /rionext start camp_b/);
+});
+
+test("formatProgress prints budget and recent calls", () => {
+  const text = formatProgress(
+    "2026-09-03T04:02:05.000Z",
+    {
+      campaign_id: "camp_x",
+      state: "active",
+      budget: { spent_calls: 78, total_calls: 1000, spent_tokens: 894472, total_tokens: 10000000 },
+      active_run: { id: "run_1", mode: "execute", state: "running" },
+    },
+    [
+      { created_at: "2026-09-03T04:00:11.000Z", kind: "model", purpose: "execute", state: "completed", actual_tokens: 57707, status: "toolUse" },
+      { created_at: "2026-09-03T03:59:23.000Z", kind: "tool", purpose: "kali_run", state: "completed", actual_tokens: 0, status: null },
+      { created_at: "2026-09-03T03:57:43.000Z", kind: "model", purpose: "execute", state: "failed_known", actual_tokens: 12, status: "timeout" },
+    ],
+  );
+  assert.match(text, /04:02:05/);
+  assert.match(text, /calls 78\/1000/);
+  assert.match(text, /execute running/);
+  assert.match(text, /model execute completed 57707 tok/);
+  assert.match(text, /kali_run completed/);
+  assert.match(text, /timeout/);
 });

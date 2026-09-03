@@ -60,11 +60,13 @@ export function resolveCampaignId(
 
 export const HELP = `RioNext campaign CLI
 
-  rionext run --spec <file> [--max-cycles 1000]
+  rionext run --spec <file> [--max-cycles 1000] [--progress-ms 300000]
                                      create if needed, then start
   rionext list                       campaigns in this data dir
   rionext status [id]                state, budget, pending flag
-  rionext start [id]                 resume Decide/Execute
+  rionext start [id] [--progress-ms 300000]
+                                     resume Decide/Execute; logs recent calls every 5 min
+                                     (--progress-ms 0 turns that off)
   rionext pause|resume|cancel [id]
   rionext accept [id]                human: submitted flag is correct
   rionext reject [id] --text <why> [--continue]

@@ -38,6 +38,44 @@ export function formatStatus(s: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
+export interface ProgressInvocation {
+  created_at: string;
+  kind: string;
+  purpose: string | null;
+  state: string;
+  actual_tokens: number;
+  status: string | null;
+  error_json?: string | null;
+}
+
+function clock(iso: string): string {
+  return iso.includes("T") ? iso.slice(11, 19) : iso;
+}
+
+export function formatProgress(
+  at: string,
+  status: Record<string, unknown>,
+  inv: ProgressInvocation[],
+): string {
+  const id = String(status.campaign_id ?? "");
+  const state = String(status.state ?? "");
+  const budget = status.budget as Record<string, unknown> | undefined;
+  const run = status.active_run as { id?: string; mode?: string; state?: string } | null;
+  const calls = budget ? `${budget.spent_calls}/${budget.total_calls}` : "";
+  const tokens = budget ? `${budget.spent_tokens}/${budget.total_tokens}` : "";
+  const runBit = run ? `${run.mode} ${run.state}` : "idle";
+  const lines = [`${clock(at)}  ${id}  ${state}  calls ${calls}  tokens ${tokens}  ${runBit}`];
+  for (const row of inv.slice(0, 6)) {
+    const tok = row.kind === "model" && row.actual_tokens ? ` ${row.actual_tokens} tok` : "";
+    const err = row.state === "failed_known" || row.status === "aborted" || row.status === "timeout"
+      ? ` ${row.status ?? row.state}`
+      : "";
+    lines.push(`         ${clock(row.created_at)}  ${row.kind} ${row.purpose ?? ""} ${row.state}${tok}${err}`.trimEnd());
+  }
+  if (!inv.length) lines.push("         (no invocations yet)");
+  return lines.join("\n");
+}
+
 export function formatVerify(result: Record<string, unknown>, id: string, accept: boolean): string {
   const state = String(result.state ?? "");
   const prop = result.proposition ? String(result.proposition) : "";

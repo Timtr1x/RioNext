@@ -1331,6 +1331,35 @@ export class StorageService {
     return { items, truncated, omitted: truncated ? 1 : 0, snapshot_seq: camp.event_head };
   }
 
+  recentInvocations(
+    campaignId: string,
+    limit = 6,
+  ): {
+    created_at: string;
+    updated_at: string;
+    kind: string;
+    purpose: string | null;
+    state: string;
+    actual_tokens: number;
+    status: string | null;
+    error_json: string | null;
+  }[] {
+    return this.store.db
+      .prepare(
+        "SELECT created_at, updated_at, kind, purpose, state, actual_tokens, status, error_json FROM invocations WHERE campaign_id = ? ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(campaignId, limit) as {
+      created_at: string;
+      updated_at: string;
+      kind: string;
+      purpose: string | null;
+      state: string;
+      actual_tokens: number;
+      status: string | null;
+      error_json: string | null;
+    }[];
+  }
+
   list(table: string, campaignId: string): Record<string, unknown>[] {
     const allowed = new Set(["steps", "facts", "findings", "events", "observations", "coverage_items", "task_runs", "invocations", "goals", "artifacts"]);
     if (!allowed.has(table)) throw denied("table_not_allowed", table);
