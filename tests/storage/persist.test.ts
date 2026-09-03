@@ -10,6 +10,7 @@ import { loadDemoSpec } from "../../src/eval/helpers.ts";
 import { ArtifactStore } from "../../src/storage/artifacts.ts";
 import { Store } from "../../src/storage/db.ts";
 import { StorageService } from "../../src/storage/service.ts";
+import { buildContextPack } from "../../src/context/builder.ts";
 
 function open(dir: string): Engine {
   return new Engine(makeRuntimeConfig(dir), { silent: true, maxCycles: 1 });
@@ -154,4 +155,48 @@ test("T22 crash reload keeps committed graph", () => {
   assert.equal(steps[0]!.id, stepId);
   assert.equal(e2.storage.getCampaign(spec.campaign_id).event_head, seq);
   e2.close();
+});
+
+test("context pack observations are newest first; graph_query defaults to oldest", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rn-"));
+  const e = open(dir);
+  const spec = loadDemoSpec("camp_obs_order");
+  e.createCampaign(spec);
+  const run = e.storage.claimDecide(spec.campaign_id, "t")!;
+  for (let i = 0; i < 25; i++) {
+    e.storage.recordObservation({
+      campaign_id: spec.campaign_id,
+      producer_id: "p",
+      submission_id: `obs-${i}`,
+      run_id: run.run_id,
+      attempt_id: run.run_id,
+      subject: `obs-${String(i).padStart(2, "0")}`,
+      body: { i },
+      artifact_refs: [],
+      conditions: {},
+      env_rev: "env-1",
+    });
+  }
+  const oldest = e.storage.graphQuery(spec.campaign_id, { entity: "observations", limit: 20 });
+  const newest = e.storage.graphQuery(spec.campaign_id, { entity: "observations", limit: 20, order: "desc" });
+  assert.equal((oldest.items[0] as { subject: string }).subject, "obs-00");
+  assert.equal((newest.items[0] as { subject: string }).subject, "obs-24");
+  const pack = buildContextPack(e.storage, {
+    run_id: run.run_id,
+    campaign_id: spec.campaign_id,
+    step_id: null,
+    mode: "decide",
+    kind: "decide",
+    attempt_no: 1,
+    fence: run.fence,
+    cancel_epoch: 0,
+    deadline_ms: Date.now() + 1000,
+    lease_owner: "t",
+    continuation_of: null,
+  });
+  const packed = JSON.stringify(pack.user_payload);
+  assert.match(packed, /obs-24/);
+  assert.match(packed, /obs-05/);
+  assert.equal(packed.includes("obs-00"), false);
+  e.close();
 });

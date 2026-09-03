@@ -1278,7 +1278,7 @@ export class StorageService {
     return false;
   }
 
-  graphQuery(campaignId: string, args: { entity: string; limit?: number; offset?: number; q?: string; depth?: number }): {
+  graphQuery(campaignId: string, args: { entity: string; limit?: number; offset?: number; q?: string; depth?: number; order?: "asc" | "desc" }): {
     items: unknown[];
     truncated: boolean;
     omitted: number;
@@ -1286,31 +1286,32 @@ export class StorageService {
   } {
     const limit = Math.min(args.limit ?? 20, 50);
     const offset = args.offset ?? 0;
+    const dir = args.order === "desc" ? "DESC" : "ASC";
     const camp = this.getCampaign(campaignId);
     let rows: unknown[] = [];
     switch (args.entity) {
       case "facts":
         rows = this.store.db
           .prepare(
-            "SELECT id, revision, proposition, fact_key, epistemic_status, source_grade, validity, support_refs_json, counter_refs_json, conditions_json FROM facts WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
+            `SELECT id, revision, proposition, fact_key, epistemic_status, source_grade, validity, support_refs_json, counter_refs_json, conditions_json FROM facts WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`,
           )
           .all(campaignId, limit + 1, offset);
         break;
       case "steps":
         rows = this.store.db
           .prepare(
-            "SELECT id, revision, kind, question, status, priority, blocked_reason, last_failure, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?",
+            `SELECT id, revision, kind, question, status, priority, blocked_reason, last_failure, fingerprint, attempt_count, branch_id, preconditions_json FROM steps WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`,
           )
           .all(campaignId, limit + 1, offset);
         break;
       case "goals":
         rows = this.store.db
-          .prepare("SELECT id, revision, statement, is_root, status, parent_id FROM goals WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?")
+          .prepare(`SELECT id, revision, statement, is_root, status, parent_id FROM goals WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
           .all(campaignId, limit + 1, offset);
         break;
       case "findings":
         rows = this.store.db
-          .prepare("SELECT id, claim, status, evidence_refs_json, dedup_key FROM findings WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?")
+          .prepare(`SELECT id, claim, status, evidence_refs_json, dedup_key FROM findings WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
           .all(campaignId, limit + 1, offset);
         break;
       case "coverage":
@@ -1320,7 +1321,7 @@ export class StorageService {
         break;
       case "observations":
         rows = this.store.db
-          .prepare("SELECT id, subject, body_json, env_rev, observed_at FROM observations WHERE campaign_id = ? ORDER BY created_seq LIMIT ? OFFSET ?")
+          .prepare(`SELECT id, subject, body_json, env_rev, observed_at FROM observations WHERE campaign_id = ? ORDER BY created_seq ${dir} LIMIT ? OFFSET ?`)
           .all(campaignId, limit + 1, offset);
         break;
       default:

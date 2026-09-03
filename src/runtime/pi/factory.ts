@@ -204,12 +204,15 @@ export class PiWorker implements WorkerRuntime {
   private buildTools(lease: RunLease, context: ContextPack): AgentTool[] {
     const s = this.deps.storage;
     const tools: AgentTool[] = [
-      tool("graph_query", "Query graph", Type.Object({
+      tool("graph_query", "Query graph. Default order is oldest first; raise offset to page. The context pack already injects the newest observations. Pass order=desc for newest first.", Type.Object({
         entity: Type.String({ description: "facts|steps|goals|findings|coverage|observations" }),
         limit: Type.Optional(Type.Number()),
         offset: Type.Optional(Type.Number()),
+        order: Type.Optional(Type.String({ description: "asc (oldest first, default) or desc (newest first)" })),
       }), async (_id, params) => {
-        const result = s.graphQuery(lease.campaign_id, params as { entity: string; limit?: number; offset?: number });
+        const p = params as { entity: string; limit?: number; offset?: number; order?: string };
+        const order = p.order === "desc" ? "desc" : "asc";
+        const result = s.graphQuery(lease.campaign_id, { entity: p.entity, limit: p.limit, offset: p.offset, order });
         return ok(result);
       }),
       tool("artifact_read", "Read a byte slice of a saved original. If kali_run set truncated, pass artifact_id and next_offset to get the next chunk.", Type.Object({
