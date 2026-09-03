@@ -35,7 +35,7 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   max_transient_retries_per_invocation: 2,
   max_new_steps_per_decision: 8,
   max_active_frontier_items: 64,
-  lease_ttl_ms: 15 * 60_000,
+  lease_ttl_ms: 60 * 60_000,
   heartbeat_ms: 20_000,
   tool_preview_limit: 50_000,
   automatic_model_fallback: false,

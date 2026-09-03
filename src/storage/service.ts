@@ -1034,7 +1034,7 @@ export class StorageService {
       .run(newId("dec"), campaignId, runId, reason, nowIso());
   }
 
-  claimNextStep(campaignId: string, owner: string, fenceSeed: number): { step_id: string; run_id: string; fence: number; kind: StepKind; question: string; attempt_no: number } | null {
+  claimNextStep(campaignId: string, owner: string, fenceSeed: number, leaseMs = 60 * 60_000): { step_id: string; run_id: string; fence: number; kind: StepKind; question: string; attempt_no: number } | null {
     return this.store.transaction(() => {
       if (!this.admissionOpen(campaignId)) return null;
       const camp = this.getCampaign(campaignId);
@@ -1074,7 +1074,7 @@ export class StorageService {
           `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
            VALUES (?, ?, ?, 'execute', ?, ?, ?, ?, ?, 'claimed', NULL, 0, 1, ?, ?)`,
         )
-        .run(runId, campaignId, step.id, step.kind, attempt, owner, fence, Date.now() + 60_000, now, now);
+        .run(runId, campaignId, step.id, step.kind, attempt, owner, fence, Date.now() + leaseMs, now, now);
       this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = ?, updated_at = ? WHERE id = ?").run(owner, now, campaignId);
       this.appendEvent(campaignId, "run.claimed", { run_id: runId, step_id: step.id }, { kind: "controller", id: owner }, runId);
       this.store.db.prepare("UPDATE steps SET status = 'running', revision = revision + 1 WHERE id = ?").run(step.id);
@@ -1083,7 +1083,7 @@ export class StorageService {
     });
   }
 
-  claimDecide(campaignId: string, owner: string): { run_id: string; fence: number } | null {
+  claimDecide(campaignId: string, owner: string, leaseMs = 60 * 60_000): { run_id: string; fence: number } | null {
     return this.store.transaction(() => {
       const camp = this.getCampaign(campaignId);
       if (camp.state === "cancelled" || camp.state === "paused" || camp.state === "completed") return null;
@@ -1103,7 +1103,7 @@ export class StorageService {
           `INSERT INTO task_runs(id, campaign_id, step_id, mode, kind, attempt_no, lease_owner, fence, deadline_ms, state, continuation_of, finish_requested, env_admission, created_at, updated_at)
            VALUES (?, ?, NULL, 'decide', 'decide', 1, ?, 1, ?, 'running', NULL, 0, 0, ?, ?)`,
         )
-        .run(runId, campaignId, owner, Date.now() + 60_000, now, now);
+        .run(runId, campaignId, owner, Date.now() + leaseMs, now, now);
       this.appendEvent(campaignId, "run.claimed", { run_id: runId, mode: "decide" }, { kind: "controller", id: owner }, runId);
       return { run_id: runId, fence: 1 };
     });

@@ -424,7 +424,7 @@ export class Engine {
   }
 
   async runDecide(campaignId: string): Promise<TaskOutcome | null> {
-    const claimed = this.storage.claimDecide(campaignId, this.config.instance_id);
+    const claimed = this.storage.claimDecide(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
     if (!claimed) return null;
     const camp = this.storage.getCampaign(campaignId);
     const lease: RunLease = {
@@ -445,7 +445,7 @@ export class Engine {
 
   async runExecuteSlot(campaignId: string): Promise<TaskOutcome | null> {
     const camp = this.storage.getCampaign(campaignId);
-    const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, camp.epoch);
+    const claimed = this.storage.claimNextStep(campaignId, this.config.instance_id, camp.epoch, this.config.lease_ttl_ms);
     if (!claimed) return null;
     const lease: RunLease = {
       run_id: claimed.run_id,

@@ -13,6 +13,11 @@ test("startup rejects unknown state-like invalid spec before any run", () => {
   assert.throws(() => validateStartupInput(spec, runtime), DomainError);
 });
 
+test("worker lease default covers a long high-thinking execute", () => {
+  const runtime = makeRuntimeConfig(":memory-data:");
+  assert.equal(runtime.lease_ttl_ms, 60 * 60_000);
+});
+
 test("startup banner has versions and no secrets", () => {
   const runtime = makeRuntimeConfig("C:/tmp/rionext-x");
   const lines: string[] = [];
