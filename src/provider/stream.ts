@@ -25,9 +25,9 @@ export interface CataloguedStreamOpts {
   apiKey?: string;
 }
 
-function streamThinkingLevel(reasoning: unknown): "off" | "minimal" | "low" | "medium" | "high" {
-  if (reasoning === "minimal" || reasoning === "low" || reasoning === "medium" || reasoning === "high") return reasoning;
-  return "off";
+function streamThinkingLevel(reasoning: unknown): "low" | "high" | "max" {
+  if (reasoning === "low" || reasoning === "high" || reasoning === "max") return reasoning;
+  return "high";
 }
 
 function campaignMaxTokens(opts: CataloguedStreamOpts, requested?: number): number {
@@ -115,7 +115,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         messages: contextMessages(context),
         tools: contextTools(context),
         max_tokens: campaignMaxTokens(opts, options?.maxTokens),
-        thinking: thinking_level === "off" ? "off" : "on",
+        thinking: "on",
         thinking_level,
       });
       const cap = Math.min(maxRetries, options?.maxRetries ?? maxRetries);

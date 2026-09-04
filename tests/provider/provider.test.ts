@@ -104,9 +104,10 @@ test("OpenAI chat uses function tools and reasoning_effort when thinking on", ()
     max_tokens: 16,
     tools: [{ name: "echo_probe", description: "d", parameters: { type: "object" } }],
     thinking: "on",
+    thinking_level: "high",
   });
   assert.equal((body.tools as { type: string }[])[0]!.type, "function");
-  assert.equal(body.reasoning_effort, "medium");
+  assert.equal(body.reasoning_effort, "high");
 });
 
 test("OpenAI thinking_level high sends reasoning_effort high", () => {
@@ -117,6 +118,50 @@ test("OpenAI thinking_level high sends reasoning_effort high", () => {
     thinking_level: "high",
   });
   assert.equal(body.reasoning_effort, "high");
+});
+
+test("OpenAI thinking_level low/max map to low/max effort", () => {
+  const lowBody = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
+    model: "deepseek-v4-flash",
+    user: "hi",
+    max_tokens: 32,
+    thinking_level: "low",
+  });
+  assert.equal(lowBody.reasoning_effort, "low");
+  const maxBody = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
+    model: "deepseek-v4-flash",
+    user: "hi",
+    max_tokens: 32,
+    thinking_level: "max",
+  });
+  assert.equal(maxBody.reasoning_effort, "max");
+});
+
+test("Anthropic thinking budget follows low/high/max caps", () => {
+  const lowBody = buildProtocolBody("ANTHROPIC_MESSAGES", {
+    model: "m",
+    user: "hi",
+    max_tokens: 51200,
+    thinking: "on",
+    thinking_level: "low",
+  });
+  assert.deepEqual(lowBody.thinking, { type: "enabled", budget_tokens: 8192 });
+  const highBody = buildProtocolBody("ANTHROPIC_MESSAGES", {
+    model: "m",
+    user: "hi",
+    max_tokens: 51200,
+    thinking: "on",
+    thinking_level: "high",
+  });
+  assert.deepEqual(highBody.thinking, { type: "enabled", budget_tokens: 16384 });
+  const maxBody = buildProtocolBody("ANTHROPIC_MESSAGES", {
+    model: "m",
+    user: "hi",
+    max_tokens: 51200,
+    thinking: "on",
+    thinking_level: "max",
+  });
+  assert.deepEqual(maxBody.thinking, { type: "enabled", budget_tokens: 25600 });
 });
 
 test("slot empty or unavailable falls back to solver then first available", () => {

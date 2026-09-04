@@ -122,7 +122,7 @@ export interface ScopeSpec {
 export interface ModelPolicy {
   provider: string;
   model: string;
-  thinking_level: "off" | "minimal" | "low" | "medium" | "high";
+  thinking_level: "low" | "high" | "max";
   allow_retry: boolean;
   allow_model_fallback: boolean;
 }

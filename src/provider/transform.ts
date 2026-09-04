@@ -22,7 +22,7 @@ export interface CommonRequest {
   max_tokens: number;
   tools?: CommonTool[];
   thinking?: "off" | "on" | "adaptive" | "enabled";
-  thinking_level?: "off" | "minimal" | "low" | "medium" | "high";
+  thinking_level?: "low" | "high" | "max";
   image_png_base64?: string;
 }
 
@@ -49,7 +49,9 @@ function anthropicBody(req: CommonRequest): Record<string, unknown> {
   }
   if (req.thinking === "adaptive") body.thinking = { type: "adaptive" };
   else if (req.thinking === "enabled" || req.thinking === "on" || thinkingOn(req)) {
-    const budget = req.thinking_level === "high" ? Math.min(8192, Math.max(1024, Math.floor(req.max_tokens / 2))) : Math.min(2048, Math.max(256, Math.floor(req.max_tokens / 2)));
+    const cap = req.thinking_level === "max" ? 32768 : req.thinking_level === "high" ? 16384 : 8192;
+    const floor = req.thinking_level === "max" ? 4096 : req.thinking_level === "high" ? 2048 : 1024;
+    const budget = Math.min(cap, Math.max(floor, Math.floor(req.max_tokens / 2)));
     body.thinking = { type: "enabled", budget_tokens: budget };
   }
   return body;
@@ -80,17 +82,16 @@ function chatCompletionsBody(req: CommonRequest): Record<string, unknown> {
 
 function thinkingOn(req: CommonRequest): boolean {
   if (req.thinking === "off") return false;
-  if (req.thinking_level === "off") return false;
   if (req.thinking_level) return true;
   return req.thinking === "on" || req.thinking === "enabled" || req.thinking === "adaptive";
 }
 
-function reasoningEffort(req: CommonRequest): "low" | "medium" | "high" | undefined {
-  const level = req.thinking_level ?? (thinkingOn(req) ? "medium" : "off");
-  if (level === "off") return undefined;
-  if (level === "low" || level === "minimal") return "low";
-  if (level === "medium") return "medium";
-  return "high";
+function reasoningEffort(req: CommonRequest): "low" | "high" | "max" | undefined {
+  const level = req.thinking_level ?? (thinkingOn(req) ? "high" : undefined);
+  if (!level) return undefined;
+  if (level === "low") return "low";
+  if (level === "high") return "high";
+  return "max";
 }
 
 function toOpenAIMessages(req: CommonRequest): Record<string, unknown>[] {
