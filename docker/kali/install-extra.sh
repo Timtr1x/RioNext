@@ -67,12 +67,20 @@ rm -rf /opt/kb/HackTricks/.git
 git clone --depth 1 https://github.com/HackTricks-wiki/hacktricks-cloud.git /opt/kb/HackTricks-Cloud
 rm -rf /opt/kb/HackTricks-Cloud/.git
 
+# 1-day PoC archive (OA/ERP/security appliances/network gear, mostly Chinese vendors).
+# Snapshot at build time; re-run kali build to refresh.
+git clone --depth 1 https://github.com/Timtr1x/Vulnerability-Wiki-PoC.git /opt/kb/Vulnerability-Wiki-PoC
+rm -rf /opt/kb/Vulnerability-Wiki-PoC/.git
+
 cat > /opt/kb/INDEX.txt <<'EOF'
 RioNext Kali knowledge bases (read-only in the master image)
 
 /opt/kb/PayloadsAllTheThings   https://github.com/swisskyrepo/PayloadsAllTheThings
 /opt/kb/HackTricks             https://github.com/HackTricks-wiki/hacktricks
 /opt/kb/HackTricks-Cloud       https://github.com/HackTricks-wiki/hacktricks-cloud
+/opt/kb/Vulnerability-Wiki-PoC https://github.com/Timtr1x/Vulnerability-Wiki-PoC
+                               2024-至今 1Day PoC, 按 年/月 归档 (如 2026/08).
+                               国产 OA/ERP/安防/数通优先翻这里.
 /opt/nuclei-templates          https://github.com/projectdiscovery/nuclei-templates
 
 Nuclei: nuclei -duc -t /opt/nuclei-templates -u <in-scope host>
@@ -88,6 +96,7 @@ fi
 test -f /opt/kb/PayloadsAllTheThings/README.md
 test -e /opt/kb/HackTricks
 test -e /opt/kb/HackTricks-Cloud
+test -d /opt/kb/Vulnerability-Wiki-PoC/2026
 
 for b in nuclei katana dalfox cloudfox kerbrute chisel httpx-toolkit; do
   command -v "$b" >/dev/null
