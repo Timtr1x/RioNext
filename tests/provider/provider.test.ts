@@ -120,7 +120,7 @@ test("OpenAI thinking_level high sends reasoning_effort high", () => {
   assert.equal(body.reasoning_effort, "high");
 });
 
-test("OpenAI thinking_level low/max map to low/max effort", () => {
+test("OpenAI thinking_level low/max map to low/high effort", () => {
   const lowBody = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
     model: "deepseek-v4-flash",
     user: "hi",
@@ -128,13 +128,14 @@ test("OpenAI thinking_level low/max map to low/max effort", () => {
     thinking_level: "low",
   });
   assert.equal(lowBody.reasoning_effort, "low");
+  // OpenAI 只有 low/medium/high 三档，没有 max；我们的 max 就是最高档 high。
   const maxBody = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
     model: "deepseek-v4-flash",
     user: "hi",
     max_tokens: 32,
     thinking_level: "max",
   });
-  assert.equal(maxBody.reasoning_effort, "max");
+  assert.equal(maxBody.reasoning_effort, "high");
 });
 
 test("Anthropic thinking budget follows low/high/max caps", () => {
@@ -275,19 +276,42 @@ test("reasoning probe records which levels a model accepts", async () => {
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     const effort = String(body.reasoning_effort ?? "");
     seen.push(effort);
-    if (effort === "max") {
-      return new Response(JSON.stringify({ error: { message: "unsupported reasoning_effort max" } }), { status: 400 });
-    }
     return new Response(JSON.stringify({ choices: [{ message: { content: "pong" } }] }), { status: 200 });
   };
   const report = await testConnection({ provider: p, model: m, apiKey: "sk", fetchFn });
+  // OpenAI 只有 low/high 两档 effort，我们的 max 映射到 high，所以只会看到 low 和 high。
   assert.ok(seen.includes("low"));
   assert.ok(seen.includes("high"));
-  assert.ok(seen.includes("max"));
+  assert.ok(!seen.includes("max"));
   assert.equal(report.reasoning.ok, true);
   assert.ok(report.reasoning.detail.includes("low"));
   assert.ok(report.reasoning.detail.includes("high"));
-  assert.ok(report.reasoning.detail.includes("max"));
+});
+
+test("Anthropic reasoning probe distinguishes low/high/max budgets", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "ant",
+    protocol: "ANTHROPIC_MESSAGES",
+    base_url: "https://api.anthropic.com",
+    api_key: "sk-ant",
+  });
+  const m = cat.addModel({ provider_id: p.id, name: "claude-x", vision: false });
+  const budgets: number[] = [];
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const thinking = body.thinking as { budget_tokens?: number } | undefined;
+    budgets.push(Number(thinking?.budget_tokens ?? 0));
+    return new Response(
+      JSON.stringify({ content: [{ type: "text", text: "pong" }] }),
+      { status: 200 },
+    );
+  };
+  const report = await testConnection({ provider: p, model: m, apiKey: "sk-ant", fetchFn });
+  // reasoning 探针是最后三个 thinking 请求（前面还有 auth/text/tools 的请求）。
+  assert.deepEqual(budgets.slice(-3), [8192, 16384, 32768]);
+  assert.equal(report.reasoning.ok, true);
+  assert.ok(report.reasoning.detail.includes("supported low,high,max"));
 });
 
 test("P1 pause resume hint revise-budget explain-step", () => {

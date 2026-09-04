@@ -86,12 +86,12 @@ function thinkingOn(req: CommonRequest): boolean {
   return req.thinking === "on" || req.thinking === "enabled" || req.thinking === "adaptive";
 }
 
-function reasoningEffort(req: CommonRequest): "low" | "high" | "max" | undefined {
+function reasoningEffort(req: CommonRequest): "low" | "high" | undefined {
   const level = req.thinking_level ?? (thinkingOn(req) ? "high" : undefined);
   if (!level) return undefined;
+  // OpenAI 只有 low/medium/high 三档 effort，没有 max；我们的 max 就是“最高档”= high。
   if (level === "low") return "low";
-  if (level === "high") return "high";
-  return "max";
+  return "high";
 }
 
 function toOpenAIMessages(req: CommonRequest): Record<string, unknown>[] {
@@ -229,7 +229,27 @@ export function extractText(protocol: Protocol, json: unknown): string {
   if (protocol === "OPENAI_RESPONSES") {
     const output = obj.output;
     if (Array.isArray(output)) {
-      return JSON.stringify(output);
+      const texts: string[] = [];
+      for (const item of output) {
+        if (item && typeof item === "object" && (item as { type?: string }).type === "message") {
+          const content = (item as { content?: unknown }).content;
+          if (Array.isArray(content)) {
+            for (const part of content) {
+              if (
+                part &&
+                typeof part === "object" &&
+                (part as { type?: string }).type === "output_text" &&
+                typeof (part as { text?: unknown }).text === "string"
+              ) {
+                texts.push((part as { text: string }).text);
+              }
+            }
+          }
+        }
+      }
+      if (texts.length) return texts.join("");
+      if (typeof obj.output_text === "string") return obj.output_text;
+      return "";
     }
     if (typeof obj.output_text === "string") return obj.output_text;
   }

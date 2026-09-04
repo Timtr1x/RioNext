@@ -35,7 +35,7 @@ export async function testConnection(opts: {
 
   const toolReq: CommonRequest = {
     model: model.name,
-    max_tokens: 128,
+    max_tokens: 1024,
     user: "Call echo_probe with token=ok. Do not answer in prose.",
     tools: [ECHO_TOOL],
     thinking: protocol === "ANTHROPIC_MESSAGES" ? "off" : "off",
@@ -57,7 +57,7 @@ export async function testConnection(opts: {
     const png = generateVisionProbePng();
     const visReq: CommonRequest = {
       model: model.name,
-      max_tokens: 64,
+      max_tokens: 1024,
       user: visionProbePrompt(),
       image_png_base64: png.toString("base64"),
       thinking: "off",
@@ -98,10 +98,10 @@ function textProbeSpecs(protocol: Protocol): CommonRequest[] {
     ];
   }
   return [
-    { model: "", max_tokens: 32, user: ping, thinking: "on" },
-    { model: "", max_tokens: 32, user: ping, thinking: "off" },
-    { model: "", max_tokens: 64, user: ping, thinking: "on", tools: [ECHO_TOOL] },
-    { model: "", max_tokens: 64, user: ping, thinking: "off", tools: [ECHO_TOOL] },
+    { model: "", max_tokens: 256, user: ping, thinking: "on" },
+    { model: "", max_tokens: 256, user: ping, thinking: "off" },
+    { model: "", max_tokens: 512, user: ping, thinking: "on", tools: [ECHO_TOOL] },
+    { model: "", max_tokens: 512, user: ping, thinking: "off", tools: [ECHO_TOOL] },
   ];
 }
 
@@ -119,7 +119,7 @@ async function runReasoningProbe(
   for (const thinking_level of levels) {
     const req: CommonRequest = {
       model,
-      max_tokens: 32,
+      max_tokens: 65536,
       user: "Reply with exactly the word pong.",
       thinking: "on",
       thinking_level,
@@ -146,7 +146,7 @@ async function runAuth(
   apiKey: string,
   fetchFn?: FetchFn,
 ): Promise<ProbeItem> {
-  const req: CommonRequest = { model, max_tokens: 8, user: "hi", thinking: "off" };
+  const req: CommonRequest = { model, max_tokens: 64, user: "hi", thinking: "off" };
   const r = await runOnce(protocol, url, apiKey, req, fetchFn, "auth");
   if (r.status === 401 || r.status === 403) return { ...r, ok: false, detail: "authentication failed" };
   return r;
