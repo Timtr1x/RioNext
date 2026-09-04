@@ -49,6 +49,9 @@ export async function testConnection(opts: {
   };
   variants.push(tools);
 
+  const reasoning = await runReasoningProbe(protocol, url, model.name, apiKey, fetchFn);
+  variants.push(...reasoning.variants);
+
   let vision: ProbeItem = { name: "vision", ok: false, detail: "model has no vision capability" };
   if (model.vision) {
     const png = generateVisionProbePng();
@@ -80,6 +83,7 @@ export async function testConnection(opts: {
     text,
     tools,
     vision,
+    reasoning: reasoning.summary,
     variants,
   };
 }
@@ -99,6 +103,40 @@ function textProbeSpecs(protocol: Protocol): CommonRequest[] {
     { model: "", max_tokens: 64, user: ping, thinking: "on", tools: [ECHO_TOOL] },
     { model: "", max_tokens: 64, user: ping, thinking: "off", tools: [ECHO_TOOL] },
   ];
+}
+
+async function runReasoningProbe(
+  protocol: Protocol,
+  url: string,
+  model: string,
+  apiKey: string,
+  fetchFn?: FetchFn,
+): Promise<{ summary: ProbeItem; variants: ProbeItem[] }> {
+  const levels = ["low", "high", "max"] as const;
+  const variants: ProbeItem[] = [];
+  const passed: string[] = [];
+  const failed: string[] = [];
+  for (const thinking_level of levels) {
+    const req: CommonRequest = {
+      model,
+      max_tokens: 32,
+      user: "Reply with exactly the word pong.",
+      thinking: "on",
+      thinking_level,
+    };
+    const item = await runOnce(protocol, url, apiKey, req, fetchFn, `reasoning:${thinking_level}`);
+    variants.push(item);
+    if (item.ok) passed.push(thinking_level);
+    else failed.push(`${thinking_level}:${item.detail.slice(0, 120)}`);
+  }
+  const summary: ProbeItem = {
+    name: "reasoning",
+    ok: passed.length > 0,
+    detail: passed.length
+      ? `supported ${passed.join(",")}${failed.length ? `; rejected ${failed.join("; ")}` : ""}`
+      : `no reasoning level accepted: ${failed.join("; ")}`,
+  };
+  return { summary, variants };
 }
 
 async function runAuth(

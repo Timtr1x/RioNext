@@ -261,6 +261,35 @@ test("OpenAI text probes are four thinking on/off groups", async () => {
   assert.ok(names.includes("off:tools"));
 });
 
+test("reasoning probe records which levels a model accepts", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "oa",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://api.openai.com",
+    api_key: "sk",
+  });
+  const m = cat.addModel({ provider_id: p.id, name: "gpt-4o-mini", vision: false });
+  const seen: string[] = [];
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const effort = String(body.reasoning_effort ?? "");
+    seen.push(effort);
+    if (effort === "max") {
+      return new Response(JSON.stringify({ error: { message: "unsupported reasoning_effort max" } }), { status: 400 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "pong" } }] }), { status: 200 });
+  };
+  const report = await testConnection({ provider: p, model: m, apiKey: "sk", fetchFn });
+  assert.ok(seen.includes("low"));
+  assert.ok(seen.includes("high"));
+  assert.ok(seen.includes("max"));
+  assert.equal(report.reasoning.ok, true);
+  assert.ok(report.reasoning.detail.includes("low"));
+  assert.ok(report.reasoning.detail.includes("high"));
+  assert.ok(report.reasoning.detail.includes("max"));
+});
+
 test("P1 pause resume hint revise-budget explain-step", () => {
   const e = new Engine(makeRuntimeConfig(dir()), { silent: true, maxCycles: 1 });
   const spec = loadDemoSpec("p1-ctrl");

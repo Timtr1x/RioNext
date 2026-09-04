@@ -57,6 +57,7 @@ export interface ProbeReport {
   text: ProbeItem;
   tools: ProbeItem;
   vision: ProbeItem;
+  reasoning: ProbeItem;
   variants: ProbeItem[];
 }
 
