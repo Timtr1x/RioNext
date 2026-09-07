@@ -24,8 +24,10 @@ clone1() { # clone1 <url> <dest>
   url=$1
   dest=$2
   i=1
-  while [ "$i" -le 5 ]; do
-    if git clone --depth 1 "$url" "$dest"; then
+  while [ "$i" -le 8 ]; do
+    # HTTP/1.1: build-network HTTP/2 streams reset on multi-hundred-MB clones.
+    # blob:none: agent only greps md text; skip blobs, fetch on demand.
+    if git -c http.version=HTTP/1.1 clone --depth 1 --filter=blob:none "$url" "$dest"; then
       return 0
     fi
     echo "clone attempt $i failed: $url" >&2
