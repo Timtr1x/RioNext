@@ -3,6 +3,39 @@
 # Pinned GitHub release URLs. Knowledge bases are depth-1 clones at image build time.
 set -eu
 
+# github.com TLS is flaky from some networks (SNI handshake can stall ~20s).
+# Everything below retries instead of failing the whole image build on one bad attempt.
+fetch() { # fetch <url> <output>
+  url=$1
+  out=$2
+  i=1
+  while [ "$i" -le 5 ]; do
+    if curl -fsSL --retry 3 --retry-delay 10 --retry-all-errors -o "$out" "$url"; then
+      return 0
+    fi
+    echo "fetch attempt $i failed: $url" >&2
+    i=$((i + 1))
+    sleep $((i * 10))
+  done
+  return 1
+}
+
+clone1() { # clone1 <url> <dest>
+  url=$1
+  dest=$2
+  i=1
+  while [ "$i" -le 5 ]; do
+    if git clone --depth 1 "$url" "$dest"; then
+      return 0
+    fi
+    echo "clone attempt $i failed: $url" >&2
+    rm -rf "$dest"
+    i=$((i + 1))
+    sleep $((i * 10))
+  done
+  return 1
+}
+
 rm -f /etc/apt/sources.list.d/kali.sources
 printf '%s\n' 'deb http://kali.download/kali kali-rolling main contrib non-free non-free-firmware' > /etc/apt/sources.list
 
@@ -26,32 +59,28 @@ trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
 
 # katana v1.7.0 (ProjectDiscovery crawler)
-curl -fsSL -o katana.zip \
-  "https://github.com/projectdiscovery/katana/releases/download/v1.7.0/katana_1.7.0_linux_amd64.zip"
+fetch "https://github.com/projectdiscovery/katana/releases/download/v1.7.0/katana_1.7.0_linux_amd64.zip" katana.zip
 unzip -qo katana.zip
 install -m 0755 katana /usr/local/bin/katana
 
 # dalfox v3.2.2 (XSS scanner)
-curl -fsSL -o dalfox.tgz \
-  "https://github.com/hahwul/dalfox/releases/download/v3.2.2/dalfox-v3.2.2-linux-x86_64.tar.gz"
+fetch "https://github.com/hahwul/dalfox/releases/download/v3.2.2/dalfox-v3.2.2-linux-x86_64.tar.gz" dalfox.tgz
 tar -xzf dalfox.tgz
 DALFOX_BIN=$(find . -maxdepth 2 -type f -name dalfox | head -n 1)
 install -m 0755 "$DALFOX_BIN" /usr/local/bin/dalfox
 
 # kerbrute v1.0.3
-curl -fsSL -o /usr/local/bin/kerbrute \
-  "https://github.com/ropnop/kerbrute/releases/download/v1.0.3/kerbrute_linux_amd64"
+fetch "https://github.com/ropnop/kerbrute/releases/download/v1.0.3/kerbrute_linux_amd64" /usr/local/bin/kerbrute
 chmod 0755 /usr/local/bin/kerbrute
 
 # cloudfox v2.0.5
-curl -fsSL -o cloudfox.zip \
-  "https://github.com/BishopFox/cloudfox/releases/download/v2.0.5/cloudfox-linux-amd64.zip"
+fetch "https://github.com/BishopFox/cloudfox/releases/download/v2.0.5/cloudfox-linux-amd64.zip" cloudfox.zip
 unzip -qo cloudfox.zip
 CLOUDFOX_BIN=$(find . -maxdepth 3 -type f -name cloudfox | head -n 1)
 install -m 0755 "$CLOUDFOX_BIN" /usr/local/bin/cloudfox
 
 # Nuclei YAML templates (the scanner is useless without these)
-git clone --depth 1 https://github.com/projectdiscovery/nuclei-templates.git /opt/nuclei-templates
+clone1 https://github.com/projectdiscovery/nuclei-templates.git /opt/nuclei-templates
 rm -rf /opt/nuclei-templates/.git
 ln -sfn /opt/nuclei-templates /opt/kb/nuclei-templates
 
@@ -60,16 +89,16 @@ printf '%s\n' 'templates-directory: /opt/nuclei-templates' 'disable-update-check
 cp /home/rionext/.config/nuclei/config.yaml /root/.config/nuclei/config.yaml
 
 # Knowledge bases
-git clone --depth 1 https://github.com/swisskyrepo/PayloadsAllTheThings.git /opt/kb/PayloadsAllTheThings
+clone1 https://github.com/swisskyrepo/PayloadsAllTheThings.git /opt/kb/PayloadsAllTheThings
 rm -rf /opt/kb/PayloadsAllTheThings/.git
-git clone --depth 1 https://github.com/HackTricks-wiki/hacktricks.git /opt/kb/HackTricks
+clone1 https://github.com/HackTricks-wiki/hacktricks.git /opt/kb/HackTricks
 rm -rf /opt/kb/HackTricks/.git
-git clone --depth 1 https://github.com/HackTricks-wiki/hacktricks-cloud.git /opt/kb/HackTricks-Cloud
+clone1 https://github.com/HackTricks-wiki/hacktricks-cloud.git /opt/kb/HackTricks-Cloud
 rm -rf /opt/kb/HackTricks-Cloud/.git
 
 # 1-day PoC archive (OA/ERP/security appliances/network gear, mostly Chinese vendors).
 # Snapshot at build time; re-run kali build to refresh.
-git clone --depth 1 https://github.com/Timtr1x/Vulnerability-Wiki-PoC.git /opt/kb/Vulnerability-Wiki-PoC
+clone1 https://github.com/Timtr1x/Vulnerability-Wiki-PoC.git /opt/kb/Vulnerability-Wiki-PoC
 rm -rf /opt/kb/Vulnerability-Wiki-PoC/.git
 
 cat > /opt/kb/INDEX.txt <<'EOF'
