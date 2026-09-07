@@ -100,7 +100,19 @@ rm -rf /opt/kb/HackTricks-Cloud/.git
 
 # 1-day PoC archive (OA/ERP/security appliances/network gear, mostly Chinese vendors).
 # Snapshot at build time; re-run kali build to refresh.
-clone1 https://github.com/Timtr1x/Vulnerability-Wiki-PoC.git /opt/kb/Vulnerability-Wiki-PoC
+# Full depth-1 (no blob filter): small repo, and blob:none checkout
+# needs on-demand blob fetch which dies on flaky TLS.
+i=1
+while [ "$i" -le 8 ]; do
+  if git -c http.version=HTTP/1.1 clone --depth 1 https://github.com/Timtr1x/Vulnerability-Wiki-PoC.git /opt/kb/Vulnerability-Wiki-PoC; then
+    break
+  fi
+  echo "poc clone attempt $i failed" >&2
+  rm -rf /opt/kb/Vulnerability-Wiki-PoC
+  i=$((i + 1))
+  sleep $((i * 10))
+done
+test -d /opt/kb/Vulnerability-Wiki-PoC/2026
 rm -rf /opt/kb/Vulnerability-Wiki-PoC/.git
 
 cat > /opt/kb/INDEX.txt <<'EOF'
