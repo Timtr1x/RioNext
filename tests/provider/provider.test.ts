@@ -10,7 +10,15 @@ import { completeBaseUrl } from "../../src/provider/paths.ts";
 import { testConnection } from "../../src/provider/probe.ts";
 import { resolveSlot, resolveVisionRoute } from "../../src/provider/router.ts";
 import { createCataloguedProviderStream } from "../../src/provider/stream.ts";
-import { buildProtocolBody, extractToolCall } from "../../src/provider/transform.ts";
+import { postJson } from "../../src/provider/client.ts";
+import {
+  buildProtocolBody,
+  extractToolCall,
+  isOpencodeEndpoint,
+  OPENCODE_SESSION_HEADER,
+  requestHeaders,
+  RIONEXT_USER_AGENT,
+} from "../../src/provider/transform.ts";
 import { OUTPUT_DEFAULT, STREAM_TIMEOUT_DEFAULT_MS } from "../../src/provider/types.ts";
 import { SCRIPTED_MODEL } from "../../src/runtime/pi/scripted-stream.ts";
 import { generateVisionProbePng, VISION_PHRASE, visionPassed } from "../../src/provider/visual-runtime.ts";
@@ -433,4 +441,80 @@ test("campaign catalogued stream uses model max_output default 51200", async () 
   );
   await s.result();
   assert.equal(saw, 51_200);
+});
+
+test("OpenCode Go URLs get x-opencode-session; other hosts do not", async () => {
+  assert.equal(isOpencodeEndpoint("https://opencode.ai/zen/go/v1/chat/completions"), true);
+  assert.equal(isOpencodeEndpoint("https://go.opencode.ai/v1/chat/completions"), true);
+  assert.equal(isOpencodeEndpoint("https://api.openai.com/v1/chat/completions"), false);
+  assert.equal(isOpencodeEndpoint("https://api.anthropic.com/v1/messages"), false);
+  const oc = requestHeaders({
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    apiKey: "sk",
+    url: "https://opencode.ai/zen/go/v1/chat/completions",
+    sessionId: "camp_demo",
+  });
+  assert.equal(oc[OPENCODE_SESSION_HEADER], "camp_demo");
+  assert.equal(oc["user-agent"], RIONEXT_USER_AGENT);
+  assert.match(oc.authorization ?? "", /Bearer/);
+  const oa = requestHeaders({
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    apiKey: "sk",
+    url: "https://api.openai.com/v1/chat/completions",
+    sessionId: "camp_demo",
+  });
+  assert.equal(oa[OPENCODE_SESSION_HEADER], undefined);
+  assert.equal(oa["user-agent"], undefined);
+
+  const seen: Record<string, string>[] = [];
+  const fetchFn: typeof fetch = async (_url, init) => {
+    seen.push(init?.headers as Record<string, string>);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  };
+  await postJson({
+    url: "https://opencode.ai/zen/go/v1/chat/completions",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    apiKey: "sk",
+    body: { model: "x" },
+    fetchFn,
+    sessionId: "camp_x",
+  });
+  await postJson({
+    url: "https://api.openai.com/v1/chat/completions",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    apiKey: "sk",
+    body: { model: "x" },
+    fetchFn,
+    sessionId: "camp_x",
+  });
+  assert.equal(seen[0]![OPENCODE_SESSION_HEADER], "camp_x");
+  assert.equal(seen[1]![OPENCODE_SESSION_HEADER], undefined);
+});
+
+test("catalogued OpenCode stream reuses one session id across turns", async () => {
+  const cat = new ProviderCatalog(dir());
+  const p = cat.addProvider({
+    display_name: "OpenCode Go",
+    protocol: "OPENAI_CHAT_COMPLETIONS",
+    base_url: "https://opencode.ai/zen/go/v1/chat/completions",
+    api_key: "sk-oc",
+  });
+  cat.addModel({ provider_id: p.id, name: "deepseek-v4-flash" });
+  const sessions: string[] = [];
+  const fetchFn: typeof fetch = async (_url, init) => {
+    const h = init?.headers as Record<string, string>;
+    sessions.push(h[OPENCODE_SESSION_HEADER] ?? "");
+    return new Response(JSON.stringify({ choices: [{ message: { content: "pong" } }] }), { status: 200 });
+  };
+  const { stream } = createCataloguedProviderStream({
+    catalog: cat,
+    providerId: p.id,
+    modelName: "deepseek-v4-flash",
+    fetchFn,
+    sessionId: "camp_sticky",
+  });
+  const ctx = { systemPrompt: "s", messages: [{ role: "user" as const, content: "hi", timestamp: Date.now() }] };
+  await (await stream(SCRIPTED_MODEL, ctx)).result();
+  await (await stream(SCRIPTED_MODEL, ctx)).result();
+  assert.deepEqual(sessions, ["camp_sticky", "camp_sticky"]);
 });

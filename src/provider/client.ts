@@ -1,5 +1,5 @@
 import type { Protocol } from "./types.ts";
-import { headersFor } from "./transform.ts";
+import { requestHeaders } from "./transform.ts";
 
 export type FetchFn = typeof fetch;
 
@@ -18,6 +18,7 @@ export async function postJson(opts: {
   fetchFn?: FetchFn;
   timeoutMs?: number;
   signal?: AbortSignal;
+  sessionId?: string;
 }): Promise<HttpResult> {
   const fetchFn = opts.fetchFn ?? fetch;
   const ctrl = new AbortController();
@@ -28,7 +29,12 @@ export async function postJson(opts: {
   try {
     const res = await fetchFn(opts.url, {
       method: "POST",
-      headers: headersFor(opts.protocol, opts.apiKey),
+      headers: requestHeaders({
+        protocol: opts.protocol,
+        apiKey: opts.apiKey,
+        url: opts.url,
+        sessionId: opts.sessionId,
+      }),
       body: JSON.stringify(opts.body),
       signal: ctrl.signal,
     });

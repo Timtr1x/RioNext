@@ -57,12 +57,14 @@ export class Engine {
   toolSends = 0;
   envSends = 0;
   private readonly modelReserveTokens: number;
+  private liveSessionId: string;
 
   constructor(
     readonly configIn: RuntimeConfig,
     private readonly options: EngineOptions = {},
   ) {
     this.config = configIn;
+    this.liveSessionId = configIn.instance_id;
     mkdirSync(configIn.artifact_root, { recursive: true });
     const store = new Store(configIn.db_path);
     const artifacts = new ArtifactStore(configIn.artifact_root);
@@ -74,7 +76,10 @@ export class Engine {
     const kaliAdapter = new KaliEffectAdapter(this.kali, (invocationId) => this.kaliOptsForInvocation(invocationId));
     const adapter = new RoutingEffectAdapter(fileAdapter, kaliAdapter);
     this.dispatchGate = new DispatchGate(this.storage, this.budget, this.invocations, adapter);
-    const live = options.chooseDecide || options.chooseExecute ? null : tryLiveCatalog(configIn.data_dir);
+    const live =
+      options.chooseDecide || options.chooseExecute
+        ? null
+        : tryLiveCatalog(configIn.data_dir, () => this.liveSessionId);
     this.modelReserveTokens = live?.reserveTokens ?? 16;
     this.factory = new PiWorkerFactory({
       storage: this.storage,
@@ -139,6 +144,7 @@ export class Engine {
   }
 
   async start(campaignId: string): Promise<void> {
+    this.liveSessionId = campaignId;
     this.banner();
     this.storage.acquireControllerLock(campaignId, this.config.instance_id, this.config.lease_ttl_ms);
     this.storage.recoverStaleRuns(campaignId);
@@ -656,7 +662,10 @@ export class Engine {
 
 }
 
-function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCataloguedProviderStream>["stream"]; modelName: string; providerId: string; reserveTokens: number } | null {
+function tryLiveCatalog(
+  dataDir: string,
+  getSessionId?: () => string,
+): { stream: ReturnType<typeof createCataloguedProviderStream>["stream"]; modelName: string; providerId: string; reserveTokens: number } | null {
   const catalogPath = join(dataDir, "providers.json");
   if (!existsSync(catalogPath)) return null;
   try {
@@ -670,6 +679,7 @@ function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCata
       fetchFn: (url, init) => fetch(url, init),
       maxRetries: 0,
       timeoutMs: STREAM_TIMEOUT_DEFAULT_MS,
+      sessionId: getSessionId,
     });
     return {
       stream,

@@ -223,6 +223,31 @@ export function headersFor(protocol: Protocol, apiKey: string): Record<string, s
   return protocol === "ANTHROPIC_MESSAGES" ? anthropicHeaders(apiKey) : openaiHeaders(apiKey);
 }
 
+export const OPENCODE_SESSION_HEADER = "x-opencode-session";
+export const RIONEXT_USER_AGENT = "rionext/0.1.0";
+
+export function isOpencodeEndpoint(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "opencode.ai" || host.endsWith(".opencode.ai");
+  } catch {
+    return false;
+  }
+}
+
+export function requestHeaders(opts: {
+  protocol: Protocol;
+  apiKey: string;
+  url: string;
+  sessionId?: string;
+}): Record<string, string> {
+  const headers = headersFor(opts.protocol, opts.apiKey);
+  if (!isOpencodeEndpoint(opts.url)) return headers;
+  headers[OPENCODE_SESSION_HEADER] = opts.sessionId?.trim() || "rionext";
+  headers["user-agent"] = RIONEXT_USER_AGENT;
+  return headers;
+}
+
 export function extractText(protocol: Protocol, json: unknown): string {
   if (!json || typeof json !== "object") return "";
   const obj = json as Record<string, unknown>;

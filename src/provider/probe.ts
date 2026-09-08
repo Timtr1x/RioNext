@@ -12,15 +12,16 @@ export async function testConnection(opts: {
   const { provider, model, apiKey, fetchFn } = opts;
   const url = provider.base_url;
   const protocol = provider.protocol;
+  const sessionId = `rionext-probe-${provider.id}`;
   const variants: ProbeItem[] = [];
 
-  const auth = await runAuth(protocol, url, model.name, apiKey, fetchFn);
+  const auth = await runAuth(protocol, url, model.name, apiKey, fetchFn, sessionId);
   variants.push(auth);
 
   const textProbes = textProbeSpecs(protocol);
   const textResults: ProbeItem[] = [];
   for (const spec of textProbes) {
-    const item = await runOnce(protocol, url, apiKey, { ...spec, model: model.name }, fetchFn);
+    const item = await runOnce(protocol, url, apiKey, { ...spec, model: model.name }, fetchFn, undefined, sessionId);
     textResults.push(item);
     variants.push(item);
   }
@@ -40,7 +41,7 @@ export async function testConnection(opts: {
     tools: [ECHO_TOOL],
     thinking: protocol === "ANTHROPIC_MESSAGES" ? "off" : "off",
   };
-  const toolRaw = await runOnce(protocol, url, apiKey, toolReq, fetchFn, "tools");
+  const toolRaw = await runOnce(protocol, url, apiKey, toolReq, fetchFn, "tools", sessionId);
   const tools: ProbeItem = {
     ...toolRaw,
     name: "tools",
@@ -49,7 +50,7 @@ export async function testConnection(opts: {
   };
   variants.push(tools);
 
-  const reasoning = await runReasoningProbe(protocol, url, model.name, apiKey, fetchFn);
+  const reasoning = await runReasoningProbe(protocol, url, model.name, apiKey, fetchFn, sessionId);
   variants.push(...reasoning.variants);
 
   let vision: ProbeItem = { name: "vision", ok: false, detail: "model has no vision capability" };
@@ -62,7 +63,7 @@ export async function testConnection(opts: {
       image_png_base64: png.toString("base64"),
       thinking: "off",
     };
-    const visRaw = await runOnce(protocol, url, apiKey, visReq, fetchFn, "vision");
+    const visRaw = await runOnce(protocol, url, apiKey, visReq, fetchFn, "vision", sessionId);
     const reply = visRaw.detail;
     vision = {
       name: "vision",
@@ -111,6 +112,7 @@ async function runReasoningProbe(
   model: string,
   apiKey: string,
   fetchFn?: FetchFn,
+  sessionId?: string,
 ): Promise<{ summary: ProbeItem; variants: ProbeItem[] }> {
   const levels = ["low", "high", "max"] as const;
   const variants: ProbeItem[] = [];
@@ -124,7 +126,7 @@ async function runReasoningProbe(
       thinking: "on",
       thinking_level,
     };
-    const item = await runOnce(protocol, url, apiKey, req, fetchFn, `reasoning:${thinking_level}`);
+    const item = await runOnce(protocol, url, apiKey, req, fetchFn, `reasoning:${thinking_level}`, sessionId);
     variants.push(item);
     if (item.ok) passed.push(thinking_level);
     else failed.push(`${thinking_level}:${item.detail.slice(0, 120)}`);
@@ -145,9 +147,10 @@ async function runAuth(
   model: string,
   apiKey: string,
   fetchFn?: FetchFn,
+  sessionId?: string,
 ): Promise<ProbeItem> {
   const req: CommonRequest = { model, max_tokens: 64, user: "hi", thinking: "off" };
-  const r = await runOnce(protocol, url, apiKey, req, fetchFn, "auth");
+  const r = await runOnce(protocol, url, apiKey, req, fetchFn, "auth", sessionId);
   if (r.status === 401 || r.status === 403) return { ...r, ok: false, detail: "authentication failed" };
   return r;
 }
@@ -159,11 +162,12 @@ async function runOnce(
   req: CommonRequest,
   fetchFn?: FetchFn,
   name?: string,
+  sessionId?: string,
 ): Promise<ProbeItem & { json?: unknown }> {
   const label = name ?? `text:${req.thinking ?? "off"}${req.tools ? "+tools" : ""}`;
   try {
     const body = buildProtocolBody(protocol, req);
-    const res = await postJson({ url, protocol, apiKey, body, fetchFn, timeoutMs: 60_000 });
+    const res = await postJson({ url, protocol, apiKey, body, fetchFn, timeoutMs: 60_000, sessionId });
     const text = extractText(protocol, res.json);
     return {
       name: label,

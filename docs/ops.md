@@ -45,6 +45,8 @@ Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx r
 
 `provider test` 测 auth / text / tools。`slots --solver` 指定主求解模型。空槽会回落到 solver。Web UI：`.\rionext.cmd provider ui --port 7780`。
 
+OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役用 campaign_id，探测用 provider id）和 `User-Agent: rionext/0.1.0`。其他供应商不加这个头。
+
 战役 spec 里的 `model_policy.provider` 用 `prv_...` id，`model` 用模型名。`thinking_level` 默认 `high`。流式超时默认 600 秒。
 
 ## 战役 spec

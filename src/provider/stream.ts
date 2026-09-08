@@ -23,6 +23,7 @@ export interface CataloguedStreamOpts {
   maxRetries?: number;
   timeoutMs?: number;
   apiKey?: string;
+  sessionId?: string | (() => string);
 }
 
 function streamThinkingLevel(reasoning: unknown): "low" | "high" | "max" {
@@ -94,6 +95,12 @@ function contextMessages(context: Context): ProtocolMessage[] {
   return out;
 }
 
+function resolveSessionId(opts: CataloguedStreamOpts): string {
+  const raw = typeof opts.sessionId === "function" ? opts.sessionId() : opts.sessionId;
+  const trimmed = raw?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : `rionext-stream-${opts.providerId}`;
+}
+
 export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
   stream: StreamFn;
   stats: CataloguedStreamStats;
@@ -137,6 +144,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
             fetchFn: opts.fetchFn,
             timeoutMs: opts.timeoutMs ?? options?.timeoutMs ?? STREAM_TIMEOUT_DEFAULT_MS,
             signal: options?.signal,
+            sessionId: resolveSessionId(opts),
           });
           if (res.ok) {
             const usage = extractUsage(res.json);

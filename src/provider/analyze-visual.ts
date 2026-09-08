@@ -36,6 +36,7 @@ export async function analyzeVisual(opts: {
     apiKey: key,
     body,
     fetchFn: opts.fetchFn,
+    sessionId: `rionext-visual-${route.provider.id}`,
   });
   if (!res.ok) throw new Error(`analyze_visual HTTP ${res.status}`);
   return {
