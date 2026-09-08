@@ -48,11 +48,23 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
 export function makeRuntimeConfig(dataDir: string, instanceId = `proc-${randomUUID()}`): RuntimeConfig {
   return {
     ...DEFAULT_RUNTIME,
+    finalization: { ...DEFAULT_FINALIZATION },
     data_dir: dataDir,
     db_path: `${dataDir.replace(/\\/g, "/")}/rionext.sqlite`,
     artifact_root: `${dataDir.replace(/\\/g, "/")}/artifacts`,
     instance_id: instanceId,
   };
+}
+
+export function applyFinalizationFlags(
+  runtime: RuntimeConfig,
+  flags: Record<string, string | boolean> = {},
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeConfig {
+  if (flags.finalization === true || flags.finalization === "1" || env.RIONEXT_FINALIZATION === "1") {
+    runtime.finalization.enabled = true;
+  }
+  return runtime;
 }
 
 export function validateStartupInput(spec: unknown, runtime: RuntimeConfig): CampaignSpec {

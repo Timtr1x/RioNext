@@ -114,9 +114,15 @@ Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx r
 
 默认 `finalization.enabled=false`：Execute 没交合法 `finish_step` 就 `incomplete_protocol`，不会自动 `resolved`。
 
-打开后，自然停笔、turn cap、普通 tool cap 会再打一轮只含 `finish_step` 的 Finalize（最多一次）。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果不会走语义成功。
+打开：
 
-回滚：把 runtime `finalization.enabled` 设回 `false`。不要靠改提示词代替这个开关。
+```
+.\rionext.cmd run --spec path\to\spec.json --finalization
+```
+
+或环境变量 `RIONEXT_FINALIZATION=1`。打开后，自然停笔、turn cap、普通 tool cap 会再打一轮只含 `finish_step` 的 Finalize（最多一次，thinking low，max_output_tokens 512）。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果不会走语义成功。`deferred`/`blocked` 没给 `reopen_rule` 时默认 `never`，不会马上再派发。
+
+回滚：不要加 `--finalization`，也不要设环境变量。不要靠改提示词代替这个开关。
 
 `status` 会打 主动交卷率、补交成功率、最终协议完整率（由 `run.finish_submitted` / `run.finalization_started` 等事件计算）。
 

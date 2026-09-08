@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
+import { applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "../../src/cli/format.ts";
 
 test("parseArgs treats accept/reject as commands and keeps positional id", () => {
@@ -55,6 +56,17 @@ test("formatList and formatVerify are operator text, not JSON", () => {
   const rej = formatVerify({ state: "active", proposition: "CTF2{x}" }, "camp_b", false);
   assert.match(rej, /rejected/);
   assert.match(rej, /rionext start camp_b/);
+});
+
+test("parseArgs --finalization and RIONEXT_FINALIZATION enable the switch", () => {
+  const parsed = parseArgs(["run", "--spec", "x.json", "--finalization"]);
+  assert.equal(parsed.flags.finalization, true);
+  const cfg = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin"), parsed.flags);
+  assert.equal(cfg.finalization.enabled, true);
+  const off = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin2"), {});
+  assert.equal(off.finalization.enabled, false);
+  const envOn = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin3"), {}, { RIONEXT_FINALIZATION: "1" } as NodeJS.ProcessEnv);
+  assert.equal(envOn.finalization.enabled, true);
 });
 
 test("formatProgress prints budget and recent calls", () => {

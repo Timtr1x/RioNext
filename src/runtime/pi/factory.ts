@@ -184,13 +184,18 @@ export class PiWorker implements WorkerRuntime {
     maxTurns: number,
     phase: WorkerPhase,
   ): Promise<void> {
-    const thinkingLevel = this.deps.storage.getCampaign(lease.campaign_id).spec.model_policy.thinking_level;
+    const cfg = this.deps.getFinalization();
+    const thinkingLevel =
+      phase === "finalizing" ? "low" : this.deps.storage.getCampaign(lease.campaign_id).spec.model_policy.thinking_level;
+    this.modelGateway?.setPhase(phase === "finalizing" ? "finalizing" : "primary");
     let turns = 0;
     const forceStop = phase === "finalizing";
+    const agentModel =
+      phase === "finalizing" ? { ...SCRIPTED_MODEL, maxTokens: cfg.max_output_tokens } : SCRIPTED_MODEL;
     const agent = new Agent({
       initialState: {
         systemPrompt: context.system_prompt,
-        model: SCRIPTED_MODEL,
+        model: agentModel,
         thinkingLevel,
         tools,
       },
@@ -313,7 +318,8 @@ export class PiWorker implements WorkerRuntime {
     if (camp.state === "cancelled" || camp.cancel_epoch > lease.cancel_epoch) return false;
     if (Date.now() > lease.deadline_ms) return false;
     if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return false;
-    if (!this.deps.budget.canAdmit(lease.campaign_id, 1, 16, 0)) return false;
+    const tokens = this.modelGateway?.finalizeReserveTokens() ?? cfg.max_output_tokens;
+    if (!this.deps.budget.canAdmit(lease.campaign_id, 1, tokens, 0)) return false;
     const uncertain = Number(
       (
         this.deps.storage.store.db
@@ -333,7 +339,8 @@ export class PiWorker implements WorkerRuntime {
       const camp = this.deps.storage.getCampaign(lease.campaign_id);
       if (Date.now() > lease.deadline_ms) return "budget";
       if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return "budget";
-      if (!this.deps.budget.canAdmit(lease.campaign_id, 1, 16, 0)) return "budget";
+      const tokens = this.modelGateway?.finalizeReserveTokens() ?? this.deps.getFinalization().max_output_tokens;
+      if (!this.deps.budget.canAdmit(lease.campaign_id, 1, tokens, 0)) return "budget";
       const uncertain = Number(
         (
           this.deps.storage.store.db
@@ -356,7 +363,7 @@ export class PiWorker implements WorkerRuntime {
           | { question: string; completion_criteria: string; expected_observations_json: string }
           | undefined)
       : undefined;
-    const ckpt = this.deps.storage.latestCheckpoint(lease.campaign_id);
+    const ckpt = this.deps.storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
     const arts = this.deps.storage.store.db
       .prepare("SELECT id FROM artifacts WHERE campaign_id = ? AND producer_attempt = ?")
       .all(lease.campaign_id, lease.run_id) as { id: string }[];
@@ -396,6 +403,14 @@ export class PiWorker implements WorkerRuntime {
           evidence_refs: Type.Optional(Type.Array(Type.String(), { maxItems: 128 })),
           blocked_on: Type.Optional(Type.String()),
           reopen_condition: Type.Optional(Type.String()),
+          reopen_rule: Type.Optional(
+            Type.Object({
+              kind: Type.String(),
+              key: Type.Optional(Type.String()),
+              env_revision: Type.Optional(Type.String()),
+              subject: Type.Optional(Type.String()),
+            }),
+          ),
           next_action: Type.Optional(Type.String()),
         },
         { additionalProperties: false },

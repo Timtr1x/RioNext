@@ -34,7 +34,7 @@ export class Store {
       | { version: number }
       | undefined;
     if (!row) {
-      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(3, nowIso());
+      this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(4, nowIso());
       return;
     }
     if (row.version < 2) {
@@ -60,6 +60,12 @@ export class Store {
     if ((latest?.version ?? 0) < 3) {
       this.migrateToV3();
     }
+    const afterV3 = this.db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get() as
+      | { version: number }
+      | undefined;
+    if ((afterV3?.version ?? 0) < 4) {
+      this.migrateToV4();
+    }
   }
 
   private migrateToV3(): void {
@@ -69,6 +75,13 @@ export class Store {
     this.addColumn("task_runs", "primary_stop_trigger", "TEXT");
     this.addColumn("task_runs", "finalize_attempted", "INTEGER NOT NULL DEFAULT 0");
     this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(3, nowIso());
+  }
+
+  private migrateToV4(): void {
+    this.addColumn("campaigns", "execute_run_id", "TEXT");
+    this.addColumn("steps", "active_run_id", "TEXT");
+    this.addColumn("steps", "next_action", "TEXT");
+    this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(4, nowIso());
   }
 
   private addColumn(table: string, name: string, decl: string): void {

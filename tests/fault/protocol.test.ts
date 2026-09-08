@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
-import { makeRuntimeConfig } from "../../src/contracts/config.ts";
+import { applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { Engine } from "../../src/controller/engine.ts";
 import { buildContextPack } from "../../src/context/builder.ts";
 import { evaluateCompletion } from "../../src/domain/completion.ts";
@@ -432,7 +432,7 @@ test("T16 new run rebuilds from structured state not Pi history", async () => {
     }
     return {
       type: "tool_calls",
-      calls: [{ name: "finish_step", arguments: { reason: "deferred", summary: "t16-last-failure", next_action: "rebuild from sqlite" } }],
+      calls: [{ name: "finish_step", arguments: { reason: "deferred", summary: "t16-last-failure", next_action: "rebuild from sqlite", reopen_rule: { kind: "always" } } }],
     };
   };
   const e = engine(dir(), { chooseDecide: oneStepDecide("t16 memory step"), chooseExecute, maxCycles: 4 });
@@ -1079,7 +1079,7 @@ test("F13 blocked without blocked_on is rejected", async () => {
   e.close();
 });
 
-test("F14 deferred without reopen or next_action is rejected", async () => {
+test("F14 deferred without reopen_rule parks and is not reclaimed", async () => {
   const e = engine(dir(), {
     chooseExecute: () => ({
       type: "tool_calls",
@@ -1092,8 +1092,11 @@ test("F14 deferred without reopen or next_action is rejected", async () => {
   seedReadyStep(e, spec.campaign_id, "f14 step", "f14-fp");
   const outcome = await e.runExecuteSlot(spec.campaign_id);
   assert.ok(outcome);
-  assert.notEqual(outcome.reason, "deferred");
-  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  assert.equal(outcome.reason, "deferred");
+  const step = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.equal(step.status, "deferred");
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  assert.equal(await e.runExecuteSlot(spec.campaign_id), null);
   e.close();
 });
 
@@ -1335,4 +1338,208 @@ test("F28 incomplete does not complete coverage finding or step", async () => {
   );
   e.close();
 });
+
+test("F29 Finalizer deferred reopen_rule=never is not reclaimed", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: {
+              disposition: "deferred",
+              summary: "try later",
+              next_action: "try 34",
+              reopen_rule: { kind: "never" },
+            },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "stop" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f29");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f29 step", "f29-fp");
+  const first = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(first);
+  assert.equal(first.reason, "deferred");
+  const step = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.equal(step.status, "deferred");
+  assert.equal(step.next_action, "try 34");
+  const ckpt = e.storage.latestCheckpoint(spec.campaign_id, { runId: first.run_id, stepId: String(step.id) });
+  assert.ok(ckpt);
+  assert.equal(ckpt.next, "try 34");
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  assert.equal(await e.runExecuteSlot(spec.campaign_id), null);
+  e.close();
+});
+
+test("F30 blocked reopen_rule=fact_key waits for the fact", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: {
+              disposition: "blocked",
+              summary: "need key",
+              blocked_on: "has_key",
+              reopen_rule: { kind: "fact_key", key: "has_key" },
+            },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "stop" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f30");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f30 step", "f30-fp");
+  const first = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(first);
+  assert.equal(first.reason, "blocked");
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  assert.equal(await e.runExecuteSlot(spec.campaign_id), null);
+  const decide = e.storage.claimDecide(spec.campaign_id, "fact")!;
+  const obs = e.storage.recordObservation({
+    campaign_id: spec.campaign_id,
+    producer_id: "fact",
+    submission_id: "key-obs",
+    run_id: decide.run_id,
+    attempt_id: decide.run_id,
+    subject: "key",
+    body: { has_key: true },
+    artifact_refs: [],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  e.storage.submitFact({
+    campaign_id: spec.campaign_id,
+    producer_id: "fact",
+    submission_id: "has-key",
+    run_id: decide.run_id,
+    proposition: "has key",
+    fact_key: "has_key",
+    support_refs: [obs.canonical_ids.observation_id!],
+    conditions: {},
+    source_grade: "observed",
+  });
+  e.storage.finishRun(spec.campaign_id, decide.run_id, {
+    run_id: decide.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "fact",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  const second = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(second);
+  e.close();
+});
+
+test("F31 expired run A cannot finishRun over run B", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "idle" }) });
+  const spec = loadDemoSpec("f31");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f31 step", "f31-fp");
+  const a = e.storage.claimNextStep(spec.campaign_id, "owner-a", 1)!;
+  e.storage.store.db.prepare("UPDATE task_runs SET deadline_ms = 0 WHERE id = ?").run(a.run_id);
+  e.storage.recoverStaleRuns(spec.campaign_id);
+  const b = e.storage.claimNextStep(spec.campaign_id, "owner-b", 1)!;
+  assert.ok(b);
+  assert.notEqual(b.run_id, a.run_id);
+  const late = e.storage.finishRun(spec.campaign_id, a.run_id, {
+    run_id: a.run_id,
+    step_id: a.step_id,
+    mode: "execute",
+    reason: "resolved",
+    summary: "stale win",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  assert.equal(late.applied, false);
+  const step = e.storage.store.db.prepare("SELECT status, active_run_id FROM steps WHERE id = ?").get(b.step_id) as {
+    status: string;
+    active_run_id: string;
+  };
+  assert.equal(step.status, "running");
+  assert.equal(step.active_run_id, b.run_id);
+  const camp = e.storage.store.db
+    .prepare("SELECT execute_lock_owner, execute_run_id FROM campaigns WHERE id = ?")
+    .get(spec.campaign_id) as { execute_lock_owner: string; execute_run_id: string };
+  assert.equal(camp.execute_lock_owner, "owner-b");
+  assert.equal(camp.execute_run_id, b.run_id);
+  assert.equal(e.storage.getRun(a.run_id).state, "lease_expired");
+  e.close();
+});
+
+test("F32 F33 F34 Finalizer reserves 512 tokens, thinking low, forced tool", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "deferred", summary: "cap", reopen_rule: { kind: "never" } },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "natural" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f32");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f32 step", "f32-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  const call = e.lastWorker?.modelGateway?.lastCall;
+  assert.ok(call);
+  assert.equal(call.purpose, "execute_finalize");
+  assert.equal(call.reserved_tokens, 512);
+  assert.equal(call.max_tokens, 512);
+  assert.equal(call.thinking_level, "low");
+  assert.equal(call.force_tool, "finish_step");
+  e.close();
+});
+
+test("F35 CLI --finalization and env actually start Finalize", async () => {
+  const chooseExecute: TurnChooser = () => ({ type: "text", text: "no finish" });
+  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir()), { finalization: true });
+  assert.equal(cfg.finalization.enabled, true);
+  const e = new Engine(cfg, { silent: true, maxCycles: 2, chooseExecute });
+  const spec = loadDemoSpec("f35");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f35 step", "f35-fp");
+  await e.runExecuteSlot(spec.campaign_id);
+  const started = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finalization_started");
+  assert.equal(started.length, 1);
+  e.close();
+});
+
 

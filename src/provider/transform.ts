@@ -24,6 +24,7 @@ export interface CommonRequest {
   thinking?: "off" | "on" | "adaptive" | "enabled";
   thinking_level?: "low" | "high" | "max";
   image_png_base64?: string;
+  force_tool?: string;
 }
 
 export function buildProtocolBody(protocol: Protocol, req: CommonRequest): Record<string, unknown> {
@@ -45,7 +46,9 @@ function anthropicBody(req: CommonRequest): Record<string, unknown> {
       description: t.description,
       input_schema: t.parameters,
     }));
-    body.tool_choice = { type: "auto" };
+    body.tool_choice = req.force_tool
+      ? { type: "tool", name: req.force_tool }
+      : { type: "auto" };
   }
   if (req.thinking === "adaptive") body.thinking = { type: "adaptive" };
   else if (req.thinking === "enabled" || req.thinking === "on" || thinkingOn(req)) {
@@ -73,7 +76,9 @@ function chatCompletionsBody(req: CommonRequest): Record<string, unknown> {
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
-    body.tool_choice = "auto";
+    body.tool_choice = req.force_tool
+      ? { type: "function", function: { name: req.force_tool } }
+      : "auto";
   }
   const effort = reasoningEffort(req);
   if (effort) body.reasoning_effort = effort;
@@ -157,6 +162,9 @@ function responsesBody(req: CommonRequest): Record<string, unknown> {
       description: t.description,
       parameters: t.parameters,
     }));
+    body.tool_choice = req.force_tool
+      ? { type: "function", name: req.force_tool }
+      : "auto";
   }
   const effort = reasoningEffort(req);
   if (effort) body.reasoning = { effort };

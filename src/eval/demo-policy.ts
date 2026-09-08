@@ -214,6 +214,8 @@ export function executeChooser(): TurnChooser {
             evidence_refs: reason === "resolved" && obs ? [obs] : [],
             blocked_on: reason === "blocked" ? plan.blocked ?? "missing_precondition" : undefined,
             next_action: reason === "deferred" ? "retry after transient or missing evidence" : undefined,
+            reopen_rule:
+              reason === "deferred" || reason === "blocked" ? { kind: "always" } : undefined,
           },
         },
       ],

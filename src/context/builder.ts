@@ -40,7 +40,7 @@ export function buildContextPack(storage: StorageService, lease: RunLease, extra
   const coverage = storage.graphQuery(lease.campaign_id, { entity: "coverage", limit: 20 });
   const observations = storage.graphQuery(lease.campaign_id, { entity: "observations", limit: 20, order: "desc" });
   const hints = storage.listHints(lease.campaign_id);
-  const checkpoint = storage.latestCheckpoint(lease.campaign_id);
+  const checkpoint = storage.latestCheckpoint(lease.campaign_id, { runId: lease.run_id, stepId: lease.step_id });
   const payload: Record<string, unknown> = {
     campaign_id: lease.campaign_id,
     mode: lease.mode,

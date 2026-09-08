@@ -107,16 +107,19 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
       }
       const provider = opts.catalog.getProvider(opts.providerId);
       const key = opts.apiKey ?? opts.catalog.apiKey(opts.providerId) ?? "catalogued-no-live-key";
-      const thinking_level = streamThinkingLevel(options?.reasoning);
+      const tools = contextTools(context);
+      const finalize = tools.length === 1 && tools[0]?.name === "finish_step";
+      const thinking_level = finalize ? "low" : streamThinkingLevel(options?.reasoning);
       const body = buildProtocolBody(provider.protocol, {
         model: opts.modelName,
         system: context.systemPrompt,
         user: userText(context),
         messages: contextMessages(context),
-        tools: contextTools(context),
-        max_tokens: campaignMaxTokens(opts, options?.maxTokens),
-        thinking: "on",
+        tools,
+        max_tokens: finalize ? Math.max(1, options?.maxTokens ?? 512) : campaignMaxTokens(opts, options?.maxTokens),
+        thinking: finalize ? "off" : "on",
         thinking_level,
+        force_tool: finalize ? "finish_step" : undefined,
       });
       const cap = Math.min(maxRetries, options?.maxRetries ?? maxRetries);
       let lastErr = "provider_error";

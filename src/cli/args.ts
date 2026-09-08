@@ -60,11 +60,12 @@ export function resolveCampaignId(
 
 export const HELP = `RioNext campaign CLI
 
-  rionext run --spec <file> [--max-cycles 1000] [--progress-ms 300000]
+  rionext run --spec <file> [--max-cycles 1000] [--progress-ms 300000] [--finalization]
                                      create if needed, then start
+                                     --finalization or RIONEXT_FINALIZATION=1 turns on Execute Finalize
   rionext list                       campaigns in this data dir
   rionext status [id]                state, budget, pending flag
-  rionext start [id] [--progress-ms 300000]
+  rionext start [id] [--progress-ms 300000] [--finalization]
                                      resume Decide/Execute; logs recent calls every 5 min
                                      (--progress-ms 0 turns that off)
   rionext pause|resume|cancel [id]

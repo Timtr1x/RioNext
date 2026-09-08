@@ -300,7 +300,7 @@ test("F23 repeat recovery does not duplicate events or step revision", () => {
   e.close();
 });
 
-test("F24 v2 database opens at schema 3 with rows intact", () => {
+test("F24 v2 database opens at schema 4 with rows intact", () => {
   const dir = mkdtempSync(join(tmpdir(), "rn-f24-"));
   const path = join(dir, "rionext.sqlite");
   mkdirSync(dir, { recursive: true });
@@ -357,7 +357,7 @@ test("F24 v2 database opens at schema 3 with rows intact", () => {
   ).run(Date.now() + 60_000, new Date().toISOString(), new Date().toISOString());
   db.close();
   const store = new Store(path);
-  assert.equal(store.schemaVersion(), 3);
+  assert.equal(store.schemaVersion(), 4);
   const camp = store.db.prepare("SELECT id, state FROM campaigns WHERE id = ?").get("camp_f24") as { id: string; state: string };
   assert.equal(camp.id, "camp_f24");
   assert.equal(camp.state, "created");
@@ -450,6 +450,101 @@ test("F25 identical submission_id replays; different payload cannot overwrite", 
   assert.equal(c.accepted, false);
   const stored = JSON.parse(String(e.storage.getRun(claimed.run_id).finish_payload_json)) as { summary: string };
   assert.equal(stored.summary, "one");
+  e.close();
+});
+
+test("F36 recovered resolved execute projects coverage", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rn-f36-"));
+  const e = open(dir);
+  const spec = loadDemoSpec("f36");
+  e.createCampaign(spec);
+  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  const root = String(e.storage.list("goals", spec.campaign_id)[0]!.id);
+  e.storage.proposeStepDirect({
+    campaign_id: spec.campaign_id,
+    producer_id: "t",
+    submission_id: "s",
+    run_id: decide.run_id,
+    question: "f36",
+    kind: "explore",
+    goal_refs: [root],
+    preconditions: { op: "all", of: [] },
+    method_family: "inspect-desk",
+    expected_observations: ["desk"],
+    completion_criteria: "none",
+    fingerprint: "f36-fp",
+    reopen_rule: { kind: "always" },
+  });
+  e.storage.finishRun(spec.campaign_id, decide.run_id, {
+    run_id: decide.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "seed",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+  const art = await e.storage.putArtifact(spec.campaign_id, "desk-raw", "text/plain", decide.run_id);
+  const obs = e.storage.recordObservation({
+    campaign_id: spec.campaign_id,
+    producer_id: "t",
+    submission_id: "o1",
+    run_id: decide.run_id,
+    attempt_id: decide.run_id,
+    subject: "desk",
+    body: { ok: true },
+    artifact_refs: [art.id],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  const claimed = e.storage.claimNextStep(spec.campaign_id, "t", 1)!;
+  const submitted = e.storage.submitRunOutcome({
+    campaign_id: spec.campaign_id,
+    run_id: claimed.run_id,
+    fence: claimed.fence,
+    submission_id: "f36-sub",
+    payload: {
+      disposition: "resolved",
+      summary: "seen",
+      evidence_refs: [obs.canonical_ids.observation_id!],
+    },
+    observation_ids: [obs.canonical_ids.observation_id!],
+    fact_ids: [],
+    finding_ids: [],
+    source: "primary",
+  });
+  assert.equal(submitted.accepted, true);
+  e.close();
+  const e2 = open(dir);
+  e2.storage.recoverStaleRuns(spec.campaign_id);
+  const run = e2.storage.getRun(claimed.run_id);
+  assert.equal(run.end_reason, "resolved");
+  const cov = e2.storage.list("coverage_items", spec.campaign_id).find((c) => c.obligation === "inspect-desk");
+  assert.equal(cov?.execution_state, "tested");
+  e2.close();
+});
+
+test("checkpoint lookup does not return another step's note", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rn-ckpt-"));
+  const e = open(dir);
+  const spec = loadDemoSpec("ckpt-iso");
+  e.createCampaign(spec);
+  const decide = e.storage.claimDecide(spec.campaign_id, "t")!;
+  e.storage.saveCheckpoint({
+    campaign_id: spec.campaign_id,
+    run_id: decide.run_id,
+    note: "other-branch",
+    next: "foreign",
+  });
+  const miss = e.storage.latestCheckpoint(spec.campaign_id, { runId: "run_missing", stepId: "step_missing" });
+  assert.equal(miss, null);
+  const hit = e.storage.latestCheckpoint(spec.campaign_id, { runId: decide.run_id });
+  assert.equal(hit?.note, "other-branch");
   e.close();
 });
 

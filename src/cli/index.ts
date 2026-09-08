@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { makeRuntimeConfig } from "../contracts/config.ts";
+import { applyFinalizationFlags, makeRuntimeConfig } from "../contracts/config.ts";
 import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
@@ -117,7 +117,7 @@ async function main(): Promise<void> {
     }
     return;
   }
-  const cfg = makeRuntimeConfig(dir);
+  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir), flags);
   if (flags["lease-ms"]) cfg.lease_ttl_ms = Number(flags["lease-ms"]);
   const engine = new Engine(cfg, {
     maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : 1000,

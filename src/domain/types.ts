@@ -241,6 +241,7 @@ export interface TaskOutcome {
   finding_ids: string[];
   blocked_on: string | null;
   reopen_rule: WakeCondition | null;
+  next_action?: string | null;
   finish_requested: boolean;
   protocol_error: string | null;
 }

@@ -25,6 +25,7 @@ export interface FinishStepInput {
   evidence_refs: string[];
   blocked_on?: string;
   reopen_condition?: string;
+  reopen_rule?: WakeCondition;
   next_action?: string;
 }
 
@@ -132,8 +133,16 @@ export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInp
     typeof p.reopen_condition === "string" && p.reopen_condition.length > 0 ? p.reopen_condition : undefined;
   const next_action = typeof p.next_action === "string" && p.next_action.length > 0 ? p.next_action : undefined;
   if (disposition === "blocked" && !blocked_on) return { ok: false, error: "blocked_requires_blocked_on" };
-  if (disposition === "deferred" && !reopen_condition && !next_action) {
-    return { ok: false, error: "deferred_requires_reopen_or_next" };
+  let reopen_rule = parseWakeCondition(p.reopen_rule);
+  if (!reopen_rule && reopen_condition) {
+    try {
+      reopen_rule = parseWakeCondition(JSON.parse(reopen_condition));
+    } catch {
+      reopen_rule = null;
+    }
+  }
+  if (disposition === "deferred" || disposition === "blocked") {
+    reopen_rule = reopen_rule ?? { kind: "never" };
   }
   return {
     ok: true,
@@ -144,9 +153,29 @@ export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInp
       evidence_refs,
       blocked_on,
       reopen_condition,
+      reopen_rule: reopen_rule ?? undefined,
       next_action,
     },
   };
+}
+
+export function parseWakeCondition(raw: unknown): WakeCondition | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as { kind?: unknown; key?: unknown; env_revision?: unknown; subject?: unknown };
+  if (p.kind === "always" || p.kind === "never") return { kind: p.kind };
+  if (p.kind === "fact_key") {
+    if (typeof p.key !== "string" || p.key.length < 1) return null;
+    return { kind: "fact_key", key: p.key };
+  }
+  if (p.kind === "env_revision") {
+    if (typeof p.env_revision !== "string" || p.env_revision.length < 1) return null;
+    return { kind: "env_revision", env_revision: p.env_revision };
+  }
+  if (p.kind === "observation_subject") {
+    if (typeof p.subject !== "string" || p.subject.length < 1) return null;
+    return { kind: "observation_subject", subject: p.subject };
+  }
+  return null;
 }
 
 export function canonicalizeFinishPayload(p: FinishStepInput): string {
@@ -156,6 +185,7 @@ export function canonicalizeFinishPayload(p: FinishStepInput): string {
     evidence_refs: [...p.evidence_refs].sort(),
     blocked_on: p.blocked_on ?? null,
     reopen_condition: p.reopen_condition ?? null,
+    reopen_rule: p.reopen_rule ?? null,
     next_action: p.next_action ?? null,
   });
 }

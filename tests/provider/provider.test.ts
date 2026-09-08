@@ -97,6 +97,42 @@ test("Anthropic body uses system top-level, input_schema, tool_choice object, no
   assert.equal(JSON.stringify(body).includes('"type":"function"'), false);
 });
 
+test("Finalizer force_tool is required finish_step on OpenAI and Anthropic", () => {
+  const tools = [{ name: "finish_step", description: "end fragment", parameters: { type: "object", properties: {} } }];
+  const openai = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
+    model: "gpt-4o",
+    user: "finish",
+    max_tokens: 512,
+    tools,
+    thinking: "off",
+    thinking_level: "low",
+    force_tool: "finish_step",
+  });
+  assert.equal(openai.max_tokens, 512);
+  assert.deepEqual(openai.tool_choice, { type: "function", function: { name: "finish_step" } });
+  const anthropic = buildProtocolBody("ANTHROPIC_MESSAGES", {
+    model: "claude-sonnet-4-6",
+    user: "finish",
+    max_tokens: 512,
+    tools,
+    thinking: "off",
+    thinking_level: "low",
+    force_tool: "finish_step",
+  });
+  assert.equal(anthropic.max_tokens, 512);
+  assert.deepEqual(anthropic.tool_choice, { type: "tool", name: "finish_step" });
+  const responses = buildProtocolBody("OPENAI_RESPONSES", {
+    model: "gpt-5",
+    user: "finish",
+    max_tokens: 512,
+    tools,
+    thinking: "off",
+    force_tool: "finish_step",
+  });
+  assert.equal(responses.max_output_tokens, 512);
+  assert.deepEqual(responses.tool_choice, { type: "function", name: "finish_step" });
+});
+
 test("OpenAI chat uses function tools and reasoning_effort when thinking on", () => {
   const body = buildProtocolBody("OPENAI_CHAT_COMPLETIONS", {
     model: "gpt-4o",

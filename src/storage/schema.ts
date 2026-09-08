@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   decide_lock_until INTEGER,
   execute_lock_owner TEXT,
   execute_lock_until INTEGER,
+  execute_run_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -136,6 +137,8 @@ CREATE TABLE IF NOT EXISTS steps (
   last_failure TEXT,
   merged_into TEXT,
   last_served_at TEXT,
+  active_run_id TEXT,
+  next_action TEXT,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
 );
 

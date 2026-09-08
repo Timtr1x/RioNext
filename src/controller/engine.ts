@@ -28,7 +28,7 @@ import { ArtifactStore } from "../storage/artifacts.ts";
 import { backupStore, restoreStore, type BackupReport, type RestoreReport } from "../storage/backup.ts";
 import { Store } from "../storage/db.ts";
 import { StorageService } from "../storage/service.ts";
-import { confirmFindingIfCurrent } from "../verification/verdict.ts";
+
 import { freshWorld, oracleGoalSatisfied, type LabWorld } from "../tools/synthetic.ts";
 import { SCHEMA_VERSION } from "../version.ts";
 
@@ -88,6 +88,7 @@ export class Engine {
           live?.modelName ?? "scripted",
           live?.providerId ?? "scripted",
           live?.reserveTokens ?? 16,
+          { finalizeMaxTokens: this.config.finalization.max_output_tokens },
         ),
       toolGatewayFor: (lease) =>
         new ToolGateway(this.storage, this.budget, this.invocations, lease, this.dispatchGate, this.config.max_tool_calls_per_run),
@@ -480,7 +481,6 @@ export class Engine {
     await worker.start(lease, ctx, ctrl.signal);
     const outcome = await worker.settle();
     this.storage.finishRun(lease.campaign_id, lease.run_id, outcome);
-    this.afterExecute(lease, outcome);
     if (worker.modelGateway) this.modelSends += worker.modelGateway.modelSends;
     if (worker.toolGateway) {
       this.toolSends += worker.toolGateway.toolSends;
@@ -654,38 +654,6 @@ export class Engine {
     this.storage.close();
   }
 
-  private afterExecute(lease: RunLease, outcome: TaskOutcome): void {
-    if (lease.mode !== "execute") return;
-    const camp = this.storage.getCampaign(lease.campaign_id);
-    const world = this.storage.getWorld<LabWorld>(lease.campaign_id, freshWorld());
-    if (lease.kind === "verify" && outcome.reason === "resolved") {
-      const ids = outcome.finding_ids.length
-        ? outcome.finding_ids
-        : this.storage
-            .list("findings", lease.campaign_id)
-            .filter((f) => f.status === "suspected" || f.status === "validating")
-            .map((f) => String(f.id));
-      for (const id of ids) {
-        confirmFindingIfCurrent(this.storage, lease.campaign_id, id, world.env_rev);
-      }
-    }
-    if (lease.step_id && outcome.reason === "resolved") {
-      const step = this.storage.store.db.prepare("SELECT method_family FROM steps WHERE id = ?").get(lease.step_id) as
-        | { method_family: string }
-        | undefined;
-      if (step?.method_family) {
-        const arts = Number(
-          (this.storage.store.db.prepare("SELECT COUNT(*) AS c FROM artifacts WHERE campaign_id = ?").get(lease.campaign_id) as { c: number }).c,
-        );
-        this.storage.updateCoverage(lease.campaign_id, step.method_family, {
-          execution_state: "tested",
-          outcome: "no_issue_observed",
-          evidence_state: arts > 0 ? "current" : "missing",
-        });
-      }
-    }
-    void camp;
-  }
 }
 
 function tryLiveCatalog(dataDir: string): { stream: ReturnType<typeof createCataloguedProviderStream>["stream"]; modelName: string; providerId: string; reserveTokens: number } | null {

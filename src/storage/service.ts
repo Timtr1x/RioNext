@@ -42,6 +42,7 @@ import {
   type SubmitRunOutcomeResult,
 } from "../contracts/finalization.ts";
 import { SCHEMA_VERSION } from "../version.ts";
+import { confirmFindingIfCurrent } from "../verification/verdict.ts";
 import { pickFairReadyStep } from "../scheduler/fair.ts";
 import { ArtifactStore, type StoredArtifact } from "./artifacts.ts";
 import { Store, asJson, fromJson, nowIso } from "./db.ts";
@@ -141,11 +142,17 @@ export class StorageService {
         if (run.mode === "decide") {
           this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
         } else {
-          this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = NULL, updated_at = ? WHERE id = ?").run(iso, campaignId);
+          this.store.db
+            .prepare(
+              "UPDATE campaigns SET execute_lock_owner = NULL, execute_run_id = NULL, updated_at = ? WHERE id = ? AND (execute_run_id = ? OR execute_run_id IS NULL)",
+            )
+            .run(iso, campaignId, run.id);
           if (run.step_id) {
             this.store.db
-              .prepare("UPDATE steps SET status = 'deferred', last_failure = 'controller_takeover', revision = revision + 1 WHERE id = ? AND status IN ('leased','running')")
-              .run(run.step_id);
+              .prepare(
+                "UPDATE steps SET status = 'deferred', last_failure = 'controller_takeover', active_run_id = NULL, revision = revision + 1 WHERE id = ? AND status IN ('leased','running') AND (active_run_id = ? OR active_run_id IS NULL)",
+              )
+              .run(run.step_id, run.id);
           }
         }
         n += 1;
@@ -1119,9 +1126,11 @@ export class StorageService {
            VALUES (?, ?, ?, 'execute', ?, ?, ?, ?, ?, 'claimed', NULL, 0, 1, ?, ?)`,
         )
         .run(runId, campaignId, step.id, step.kind, attempt, owner, fence, Date.now() + leaseMs, now, now);
-      this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = ?, updated_at = ? WHERE id = ?").run(owner, now, campaignId);
+      this.store.db
+        .prepare("UPDATE campaigns SET execute_lock_owner = ?, execute_run_id = ?, updated_at = ? WHERE id = ?")
+        .run(owner, runId, now, campaignId);
       this.appendEvent(campaignId, "run.claimed", { run_id: runId, step_id: step.id }, { kind: "controller", id: owner }, runId);
-      this.store.db.prepare("UPDATE steps SET status = 'running', revision = revision + 1 WHERE id = ?").run(step.id);
+      this.store.db.prepare("UPDATE steps SET status = 'running', active_run_id = ?, revision = revision + 1 WHERE id = ?").run(runId, step.id);
       this.store.db.prepare("UPDATE task_runs SET state = 'running', updated_at = ? WHERE id = ?").run(now, runId);
       return { step_id: step.id, run_id: runId, fence, kind: step.kind, question: step.question, attempt_no: attempt };
     });
@@ -1153,48 +1162,78 @@ export class StorageService {
     });
   }
 
-  finishRun(campaignId: string, runId: string, outcome: TaskOutcome): void {
-    this.store.transaction(() => {
+  finishRun(campaignId: string, runId: string, outcome: TaskOutcome): { applied: boolean } {
+    return this.store.transaction(() => {
       const run = this.store.db.prepare("SELECT * FROM task_runs WHERE id = ? AND campaign_id = ?").get(runId, campaignId) as
         | Record<string, unknown>
         | undefined;
       if (!run) throw invalidInput("run_not_found", "run not found");
-      if (String(run.state) === "finished") return;
-      let applied = outcome;
+      if (String(run.state) === "finished") return { applied: false };
+      let appliedOutcome = outcome;
       if (run.finish_payload_json && run.mode === "execute") {
-        applied = this.outcomeFromFinishPayload(run, String(run.finish_payload_json));
+        appliedOutcome = this.outcomeFromFinishPayload(run, String(run.finish_payload_json));
       }
       const now = nowIso();
-      this.store.db
-        .prepare("UPDATE task_runs SET state = 'finished', end_reason = ?, outcome_json = ?, updated_at = ? WHERE id = ?")
-        .run(applied.reason, asJson(applied), now, runId);
+      const cas = this.store.db
+        .prepare(
+          `UPDATE task_runs SET state = 'finished', end_reason = ?, outcome_json = ?, updated_at = ?
+           WHERE id = ? AND campaign_id = ? AND fence = ? AND state IN ('claimed', 'running')`,
+        )
+        .run(appliedOutcome.reason, asJson(appliedOutcome), now, runId, campaignId, Number(run.fence));
+      if (Number(cas.changes) === 0) return { applied: false };
       if (run.mode === "decide") {
         this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(now, campaignId);
       } else {
-        this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = NULL, updated_at = ? WHERE id = ?").run(now, campaignId);
+        this.store.db
+          .prepare(
+            "UPDATE campaigns SET execute_lock_owner = NULL, execute_run_id = NULL, updated_at = ? WHERE id = ? AND (execute_run_id = ? OR execute_run_id IS NULL)",
+          )
+          .run(now, campaignId, runId);
         const stepId = run.step_id as string | null;
         if (stepId) {
-          const next = outcomeToStepStatus(applied.reason);
-          const step = this.store.db.prepare("SELECT status, revision FROM steps WHERE id = ?").get(stepId) as {
+          const next = outcomeToStepStatus(appliedOutcome.reason);
+          const step = this.store.db.prepare("SELECT status, active_run_id FROM steps WHERE id = ?").get(stepId) as {
             status: StepStatus;
-            revision: number;
+            active_run_id: string | null;
           };
-          if (step.status === "running" || step.status === "leased") {
+          const owns = !step.active_run_id || String(step.active_run_id) === runId;
+          if (owns && (step.status === "running" || step.status === "leased")) {
             transitionStep(step.status === "leased" ? "running" : "running", next);
-            const reopenJson =
-              applied.reason === "incomplete_protocol" ? asJson(incompleteReopenRule()) : null;
-            if (reopenJson) {
-              this.store.db
-                .prepare(
-                  "UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?, reopen_rule_json = ?, ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END, revision = revision + 1 WHERE id = ?",
-                )
-                .run(next, applied.blocked_on, applied.summary, reopenJson, next, now, stepId);
-            } else {
-              this.store.db
-                .prepare(
-                  "UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?, ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END, revision = revision + 1 WHERE id = ?",
-                )
-                .run(next, applied.blocked_on, applied.summary, next, now, stepId);
+            const park =
+              next === "deferred" || next === "blocked"
+                ? asJson(appliedOutcome.reopen_rule ?? incompleteReopenRule())
+                : null;
+            const nextAction = appliedOutcome.reason === "deferred" || appliedOutcome.reason === "blocked"
+              ? this.nextActionFromOutcome(appliedOutcome)
+              : null;
+            this.store.db
+              .prepare(
+                `UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?,
+                  reopen_rule_json = COALESCE(?, reopen_rule_json),
+                  next_action = COALESCE(?, next_action),
+                  active_run_id = NULL,
+                  ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END,
+                  revision = revision + 1 WHERE id = ? AND (active_run_id = ? OR active_run_id IS NULL)`,
+              )
+              .run(
+                next,
+                appliedOutcome.blocked_on,
+                appliedOutcome.summary,
+                park,
+                nextAction,
+                next,
+                now,
+                stepId,
+                runId,
+              );
+            if (nextAction) {
+              this.saveCheckpoint({
+                campaign_id: campaignId,
+                run_id: runId,
+                note: nextAction,
+                next: nextAction,
+                payload: { step_id: stepId, source: "finish_next_action" },
+              });
             }
             if (next === "ready") {
               this.appendEvent(campaignId, "step.ready", { step_id: stepId }, { kind: "controller", id: "scheduler" }, stepId);
@@ -1202,10 +1241,51 @@ export class StorageService {
           }
         }
       }
-      this.appendEvent(campaignId, "run.finished", { run_id: runId, outcome: applied }, { kind: "controller", id: "engine" }, runId);
+      this.appendEvent(campaignId, "run.finished", { run_id: runId, outcome: appliedOutcome }, { kind: "controller", id: "engine" }, runId);
       if (run.mode !== "decide") {
         this.markRequested(campaignId, this.getCampaign(campaignId).event_head);
       }
+      this.projectExecuteOutcome(campaignId, run, appliedOutcome);
+      return { applied: true };
+    });
+  }
+
+  private nextActionFromOutcome(outcome: TaskOutcome): string | null {
+    const extra = outcome as TaskOutcome & { next_action?: string };
+    if (typeof extra.next_action === "string" && extra.next_action.length > 0) return extra.next_action;
+    return null;
+  }
+
+  projectExecuteOutcome(campaignId: string, run: Record<string, unknown>, outcome: TaskOutcome): void {
+    if (run.mode !== "execute") return;
+    if (outcome.reason !== "resolved") return;
+    const env = String(
+      (this.getWorld<{ env_rev?: string }>(campaignId, { env_rev: this.getCampaign(campaignId).spec.environment_revision }) as { env_rev?: string })
+        .env_rev ?? this.getCampaign(campaignId).spec.environment_revision,
+    );
+    if (String(run.kind) === "verify") {
+      const ids = outcome.finding_ids.length
+        ? outcome.finding_ids
+        : this.list("findings", campaignId)
+            .filter((f) => f.status === "suspected" || f.status === "validating")
+            .map((f) => String(f.id));
+      for (const id of ids) {
+        confirmFindingIfCurrent(this, campaignId, id, env);
+      }
+    }
+    const stepId = run.step_id ? String(run.step_id) : outcome.step_id;
+    if (!stepId) return;
+    const step = this.store.db.prepare("SELECT method_family FROM steps WHERE id = ?").get(stepId) as
+      | { method_family: string }
+      | undefined;
+    if (!step?.method_family) return;
+    const arts = Number(
+      (this.store.db.prepare("SELECT COUNT(*) AS c FROM artifacts WHERE campaign_id = ?").get(campaignId) as { c: number }).c,
+    );
+    this.updateCoverage(campaignId, step.method_family, {
+      execution_state: "tested",
+      outcome: "no_issue_observed",
+      evidence_state: arts > 0 ? "current" : "missing",
     });
   }
 
@@ -1451,7 +1531,8 @@ export class StorageService {
       fact_ids: payload.fact_ids ?? [],
       finding_ids: payload.finding_ids ?? [],
       blocked_on: payload.blocked_on ?? null,
-      reopen_rule: reason === "incomplete_protocol" ? incompleteReopenRule() : null,
+      reopen_rule: payload.reopen_rule ?? (reason === "incomplete_protocol" ? incompleteReopenRule() : null),
+      next_action: payload.next_action ?? null,
       finish_requested: true,
       protocol_error: null,
     };
@@ -1501,11 +1582,28 @@ export class StorageService {
     return { id };
   }
 
-  latestCheckpoint(campaignId: string): Record<string, unknown> | null {
-    const row = this.store.db
-      .prepare("SELECT * FROM checkpoints WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 1")
-      .get(campaignId) as Record<string, unknown> | undefined;
-    return row ?? null;
+  latestCheckpoint(
+    campaignId: string,
+    filter: { runId?: string | null; stepId?: string | null } = {},
+  ): Record<string, unknown> | null {
+    if (filter.runId) {
+      const row = this.store.db
+        .prepare("SELECT * FROM checkpoints WHERE campaign_id = ? AND run_id = ? ORDER BY created_at DESC LIMIT 1")
+        .get(campaignId, filter.runId) as Record<string, unknown> | undefined;
+      if (row) return row;
+    }
+    if (filter.stepId) {
+      const row = this.store.db
+        .prepare(
+          `SELECT c.* FROM checkpoints c
+           JOIN task_runs r ON r.id = c.run_id
+           WHERE c.campaign_id = ? AND r.step_id = ?
+           ORDER BY c.created_at DESC LIMIT 1`,
+        )
+        .get(campaignId, filter.stepId) as Record<string, unknown> | undefined;
+      if (row) return row;
+    }
+    return null;
   }
 
   listHints(campaignId: string, limit = 8): { seq: number; text: string }[] {
@@ -1554,18 +1652,21 @@ export class StorageService {
         continue;
       }
       if (value !== "true") continue;
-      if (s.status === "blocked" || s.status === "proposed") {
+      if (s.status === "proposed") {
         this.store.db
           .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = ?, revision = revision + 1 WHERE id = ?")
           .run(now, s.id);
         this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: s.status }, { kind: "controller", id: "scheduler" }, s.id);
         continue;
       }
-      if (s.status === "deferred" && this.reopenSatisfied(campaignId, rule, s.attempt_count)) {
+      if (
+        (s.status === "blocked" || s.status === "deferred") &&
+        this.reopenSatisfied(campaignId, rule, s.attempt_count)
+      ) {
         this.store.db
           .prepare("UPDATE steps SET status = 'ready', blocked_reason = NULL, ready_since = ?, revision = revision + 1 WHERE id = ?")
           .run(now, s.id);
-        this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: "deferred" }, { kind: "controller", id: "scheduler" }, s.id);
+        this.appendEvent(campaignId, "step.ready", { step_id: s.id, from: s.status }, { kind: "controller", id: "scheduler" }, s.id);
       }
     }
   }

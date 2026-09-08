@@ -68,10 +68,21 @@ export interface ToolInvokeResult {
   allowed: boolean;
 }
 
+export interface ModelCallRecord {
+  purpose: string;
+  reserved_tokens: number;
+  max_tokens: number;
+  thinking_level: string;
+  force_tool: string | null;
+}
+
 export class ModelGateway {
   modelSends = 0;
   lastError: string | null = null;
   closed = false;
+  phase: "primary" | "finalizing" = "primary";
+  lastCall: ModelCallRecord | null = null;
+  private readonly finalizeMaxTokens: number;
 
   constructor(
     private readonly storage: StorageService,
@@ -82,10 +93,21 @@ export class ModelGateway {
     private readonly modelId: string,
     private readonly providerName = "scripted",
     private readonly reserveTokens = 16,
-  ) {}
+    extra: { finalizeMaxTokens?: number } = {},
+  ) {
+    this.finalizeMaxTokens = Math.max(1, extra.finalizeMaxTokens ?? 512);
+  }
 
   closeAdmission(): void {
     this.closed = true;
+  }
+
+  setPhase(phase: "primary" | "finalizing"): void {
+    this.phase = phase;
+  }
+
+  finalizeReserveTokens(): number {
+    return this.finalizeMaxTokens;
   }
 
   stream: StreamFn = (model: Model<string>, context: Context, options) => {
@@ -104,7 +126,18 @@ export class ModelGateway {
       this.lastError = deadlineDeny;
       return errorStream(model, deadlineDeny);
     }
-    const reserveTokens = Math.max(1, this.reserveTokens);
+    const finalizing = this.phase === "finalizing";
+    const reserveTokens = Math.max(1, finalizing ? this.finalizeMaxTokens : this.reserveTokens);
+    const purpose = finalizing ? "execute_finalize" : this.lease.mode;
+    const forceTool = finalizing ? "finish_step" : null;
+    const thinkingLevel = finalizing ? "low" : String(options?.reasoning ?? camp.spec.model_policy.thinking_level);
+    this.lastCall = {
+      purpose,
+      reserved_tokens: reserveTokens,
+      max_tokens: reserveTokens,
+      thinking_level: thinkingLevel,
+      force_tool: forceTool,
+    };
     if (!this.budget.canAdmit(this.lease.campaign_id, 1, reserveTokens, 0)) {
       this.lastError = "budget_exhausted";
       return errorStream(model, "budget_exhausted");
@@ -113,7 +146,7 @@ export class ModelGateway {
       campaign_id: this.lease.campaign_id,
       run_id: this.lease.run_id,
       kind: "model",
-      purpose: this.lease.mode,
+      purpose,
       fence: this.lease.fence,
       cancel_epoch: this.lease.cancel_epoch,
       prompt_hash: hashJson({ system: context.systemPrompt, n: context.messages.length }),
@@ -127,7 +160,13 @@ export class ModelGateway {
     this.invocations.mark(inv.id, "running");
     this.modelSends += 1;
     try {
-      const stream = this.inner(model, context, options);
+      const callModel = { ...model, maxTokens: reserveTokens };
+      const callOpts = {
+        ...options,
+        maxTokens: reserveTokens,
+        reasoning: finalizing ? ("low" as const) : options?.reasoning,
+      };
+      const stream = this.inner(callModel, context, callOpts);
       return wrapSettle(stream, (msg) => {
         const tokens = Number(msg.usage?.totalTokens ?? reserveTokens);
         const failed = msg.stopReason === "error" || msg.stopReason === "aborted";
