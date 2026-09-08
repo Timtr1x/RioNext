@@ -371,7 +371,7 @@ export const STEP_TRANSITIONS: Record<StepStatus, StepStatus[]> = {
   proposed: ["ready", "blocked", "retired"],
   ready: ["leased", "retired", "blocked"],
   leased: ["running", "ready", "blocked"],
-  running: ["awaiting", "resolved", "deferred", "blocked"],
+  running: ["awaiting", "resolved", "deferred", "blocked", "retired"],
   awaiting: ["running", "blocked"],
   resolved: [],
   deferred: ["ready", "retired"],

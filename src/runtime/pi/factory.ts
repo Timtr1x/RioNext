@@ -1,8 +1,21 @@
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { loadPrompt } from "../../context/builder.ts";
+import type { FinalizationConfig } from "../../contracts/finalization.ts";
+import {
+  frameworkReason,
+  isSemanticDisposition,
+  needsFinalizer,
+  parseFinishInput,
+  type FinalizeContext,
+  type PrimaryStopTrigger,
+  type WorkerPhase,
+} from "../../contracts/finalization.ts";
 import type { ContextPack, WorkerFactory, WorkerRuntime } from "../../contracts/worker-runtime.ts";
+import { DomainError } from "../../domain/errors.ts";
 import { newId } from "../../domain/ids.ts";
 import type { RunLease, TaskOutcome, WorkerMode } from "../../domain/types.ts";
+import type { BudgetLedger } from "../../gateway/budget-ledger.ts";
 import { ingestToolOutputAsData, type ModelGateway, type ToolGateway } from "../../gateway/gateways.ts";
 import type { StorageService } from "../../storage/service.ts";
 import { isKaliProfile } from "../../tools/kali-profile.ts";
@@ -22,6 +35,8 @@ export interface FactoryDeps {
   chooseDecide: TurnChooser;
   chooseExecute: TurnChooser;
   getMaxTurns: () => { decide: number; execute: number; tools?: number };
+  getFinalization: () => FinalizationConfig;
+  budget: BudgetLedger;
   kali?: KaliRuntime;
   liveStream?: PiStreamFn;
 }
@@ -49,6 +64,12 @@ export class PiWorker implements WorkerRuntime {
   finishThenBlocked = 0;
   modelGateway: ModelGateway | null = null;
   toolGateway: ToolGateway | null = null;
+  phase: WorkerPhase = "primary";
+  primaryStop: PrimaryStopTrigger | null = null;
+  finalizerModelSends = 0;
+  private stopAfterTurnReason: "turn_cap" | "tool_cap" | "finish" | null = null;
+  private activeLease: RunLease | null = null;
+  private activeContext: ContextPack | null = null;
 
   constructor(
     mode: WorkerMode,
@@ -68,16 +89,104 @@ export class PiWorker implements WorkerRuntime {
   async start(lease: RunLease, context: ContextPack, signal: AbortSignal): Promise<void> {
     this.abortCtrl = new AbortController();
     signal.addEventListener("abort", () => this.abort());
+    this.activeLease = lease;
+    this.activeContext = context;
     const chooser = this.mode === "decide" ? this.deps.chooseDecide : this.deps.chooseExecute;
     const inner = this.deps.liveStream ?? createScriptedStreamFn(chooser);
     this.modelGateway = this.deps.modelGatewayFor(lease, inner);
     this.toolGateway = this.deps.toolGatewayFor(lease);
+    this.settled = this.mode === "decide" ? this.runDecide(lease, context) : this.runExecute(lease, context);
+    void this.settled;
+  }
+
+  private async runDecide(lease: RunLease, context: ContextPack): Promise<TaskOutcome> {
     const tools = this.buildTools(lease, context);
-    const caps = this.deps.getMaxTurns();
-    const maxTurns = this.mode === "decide" ? caps.decide : caps.execute;
-    let turns = 0;
-    let finishRequested = false;
+    await this.runAgentLoop(lease, context, tools, this.deps.getMaxTurns().decide, "primary");
+    if (!this.outcome) {
+      this.outcome = this.makeOutcome(lease, "incomplete_protocol", "missing finish tool", false);
+    }
+    this.phase = "settled";
+    return this.outcome;
+  }
+
+  private async runExecute(lease: RunLease, context: ContextPack): Promise<TaskOutcome> {
+    this.phase = "primary";
+    const tools = this.buildTools(lease, context);
+    const maxTurns = this.deps.getMaxTurns().execute;
+    await this.runAgentLoop(lease, context, tools, maxTurns, "primary");
+    const trigger = this.classifyPrimaryExit(lease);
+    this.primaryStop = trigger;
+    this.deps.storage.recordPrimaryStop(lease.campaign_id, lease.run_id, trigger, lease.step_id);
+    if (this.outcome && isSemanticDisposition(this.outcome.reason) && this.outcome.finish_requested) {
+      this.phase = "settled";
+      return this.outcome;
+    }
+    if (
+      needsFinalizer(trigger) &&
+      this.canAffordFinalizer(lease, trigger) &&
+      (trigger === "natural_stop" || trigger === "turn_cap" || trigger === "tool_cap")
+    ) {
+      const repaired = await this.runFinalizer(lease, context, trigger);
+      if (repaired) {
+        this.phase = "settled";
+        return repaired;
+      }
+    }
+    if (!this.outcome || !isSemanticDisposition(this.outcome.reason) || !this.outcome.finish_requested) {
+      const reason = this.frameworkOutcomeReason(lease, trigger);
+      this.outcome = this.makeOutcome(
+        lease,
+        reason,
+        this.outcome?.summary ?? `primary_stop:${trigger}`,
+        Boolean(this.outcome?.finish_requested),
+        this.outcome?.blocked_on ?? undefined,
+      );
+    }
+    this.phase = "settled";
+    return this.outcome;
+  }
+
+  private async runFinalizer(
+    lease: RunLease,
+    context: ContextPack,
+    trigger: "natural_stop" | "turn_cap" | "tool_cap",
+  ): Promise<TaskOutcome | null> {
+    this.phase = "finalizing";
+    this.deps.storage.beginFinalization(lease.campaign_id, lease.run_id, trigger, lease.step_id);
+    const before = this.modelGateway?.modelSends ?? 0;
+    const tools = [this.finishStepTool(lease, "finalizer")];
+    const pack: ContextPack = {
+      ...context,
+      system_prompt: loadPrompt("finalize"),
+      user_payload: this.buildFinalizeContext(lease, context, trigger),
+      tool_names: ["finish_step"],
+    };
+    this.stopAfterTurnReason = null;
+    try {
+      await this.runAgentLoop(lease, pack, tools, 1, "finalizing");
+    } catch (err) {
+      this.finalizerModelSends = (this.modelGateway?.modelSends ?? 0) - before;
+      this.deps.storage.markFinalizationFailed(lease.campaign_id, lease.run_id, String(err), lease.step_id);
+      return null;
+    }
+    this.finalizerModelSends = (this.modelGateway?.modelSends ?? 0) - before;
+    if (this.outcome && isSemanticDisposition(this.outcome.reason) && this.outcome.finish_requested) {
+      return this.outcome;
+    }
+    this.deps.storage.markFinalizationFailed(lease.campaign_id, lease.run_id, "no_legal_finish", lease.step_id);
+    return null;
+  }
+
+  private async runAgentLoop(
+    lease: RunLease,
+    context: ContextPack,
+    tools: AgentTool[],
+    maxTurns: number,
+    phase: WorkerPhase,
+  ): Promise<void> {
     const thinkingLevel = this.deps.storage.getCampaign(lease.campaign_id).spec.model_policy.thinking_level;
+    let turns = 0;
+    const forceStop = phase === "finalizing";
     const agent = new Agent({
       initialState: {
         systemPrompt: context.system_prompt,
@@ -85,19 +194,24 @@ export class PiWorker implements WorkerRuntime {
         thinkingLevel,
         tools,
       },
-      streamFn: this.modelGateway.stream,
+      streamFn: this.modelGateway!.stream,
       toolExecution: "sequential",
       beforeToolCall: async ({ toolCall }) => {
         const env = isEnvTool(toolCall.name);
         if (this.mode === "decide" && env) {
           return { block: true, reason: "decide_has_no_env_tools" };
         }
+        if (phase === "finalizing" && env) {
+          return { block: true, reason: "finalizer_no_env_tools" };
+        }
+        const terminal = toolCall.name === "finish_step" || toolCall.name === "finish_decision";
         const admitted = await this.toolGateway!.admit({
           name: toolCall.name,
           args: toolCall.arguments,
           lease,
           effect: env ? "unknown" : "pure",
           envTool: env,
+          controlPlane: terminal ? "terminal" : undefined,
         });
         if (!admitted.allowed) {
           if (admitted.reason === "finish_closed_env") this.finishThenBlocked += 1;
@@ -129,18 +243,31 @@ export class PiWorker implements WorkerRuntime {
             skip_progress: true,
           });
         }
-        if (toolCall.name === "finish_step" || toolCall.name === "finish_decision") {
-          finishRequested = true;
+        if (
+          (toolCall.name === "finish_step" || toolCall.name === "finish_decision") &&
+          this.outcome &&
+          isSemanticDisposition(this.outcome.reason)
+        ) {
           return { terminate: true, details: result.details };
         }
         return undefined;
       },
       shouldStopAfterTurn: async () => {
         turns += 1;
-        if (finishRequested) return true;
-        if (turns >= maxTurns) return true;
+        if (forceStop) return true;
+        if (this.outcome && isSemanticDisposition(this.outcome.reason) && this.outcome.finish_requested) {
+          this.stopAfterTurnReason = "finish";
+          return true;
+        }
+        if (turns >= maxTurns) {
+          this.stopAfterTurnReason = "turn_cap";
+          return true;
+        }
         const toolCap = this.deps.getMaxTurns().tools ?? 24;
-        if ((this.toolGateway?.toolSends ?? 0) >= toolCap) return true;
+        if ((this.toolGateway?.toolSends ?? 0) >= toolCap) {
+          this.stopAfterTurnReason = "tool_cap";
+          return true;
+        }
         return false;
       },
     });
@@ -149,25 +276,185 @@ export class PiWorker implements WorkerRuntime {
     agent.subscribe((event) => {
       this.events.push(event);
     });
-    this.settled = (async () => {
-      try {
-        await agent.prompt(JSON.stringify(context.user_payload));
-        await agent.waitForIdle();
-      } catch (err) {
-        this.outcome = this.makeOutcome(lease, "protocol_error", String(err), finishRequested);
-        return this.outcome;
-      }
-      if (!this.outcome) {
-        this.outcome = this.makeOutcome(
-          lease,
-          finishRequested ? "resolved" : "incomplete_protocol",
-          finishRequested ? "finished" : "missing finish tool",
-          finishRequested,
-        );
-      }
-      return this.outcome;
-    })();
-    void this.settled;
+    try {
+      await agent.prompt(JSON.stringify(context.user_payload));
+      await agent.waitForIdle();
+    } catch (err) {
+      this.outcome = this.makeOutcome(lease, "protocol_error", String(err), Boolean(this.outcome?.finish_requested));
+      this.primaryStop = this.primaryStop ?? "runtime_error";
+    }
+  }
+
+  private classifyPrimaryExit(lease: RunLease): PrimaryStopTrigger {
+    if (this.outcome && isSemanticDisposition(this.outcome.reason) && this.outcome.finish_requested) {
+      return "finish_committed";
+    }
+    if (this.abortCtrl?.signal.aborted) return "cancelled";
+    const last = lastAssistant(this.agent?.state.messages ?? []);
+    if (last?.stopReason === "error") return "model_error";
+    if (last?.stopReason === "aborted") return this.abortCtrl?.signal.aborted ? "cancelled" : "aborted";
+    if (this.outcome?.reason === "protocol_error") return "model_error";
+    const camp = this.deps.storage.getCampaign(lease.campaign_id);
+    if (Date.now() > lease.deadline_ms) return "deadline";
+    if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return "deadline";
+    if (this.stopAfterTurnReason === "turn_cap") return "turn_cap";
+    if (this.stopAfterTurnReason === "tool_cap") return "tool_cap";
+    if (last && last.stopReason !== "toolUse") return "natural_stop";
+    if (!last) return "natural_stop";
+    return "runtime_error";
+  }
+
+  private canAffordFinalizer(lease: RunLease, trigger: PrimaryStopTrigger): boolean {
+    const cfg = this.deps.getFinalization();
+    if (!cfg.enabled) return false;
+    if (cfg.max_attempts !== 1) return false;
+    if (!needsFinalizer(trigger)) return false;
+    const camp = this.deps.storage.getCampaign(lease.campaign_id);
+    if (camp.state === "cancelled" || camp.cancel_epoch > lease.cancel_epoch) return false;
+    if (Date.now() > lease.deadline_ms) return false;
+    if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return false;
+    if (!this.deps.budget.canAdmit(lease.campaign_id, 1, 16, 0)) return false;
+    const uncertain = Number(
+      (
+        this.deps.storage.store.db
+          .prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND state = 'uncertain'")
+          .get(lease.run_id) as { c: number }
+      ).c,
+    );
+    if (uncertain > 0) return false;
+    const run = this.deps.storage.getRun(lease.run_id);
+    if (Number(run.finalize_attempted) >= 1 && !run.finish_payload_json) return false;
+    return true;
+  }
+
+  private frameworkOutcomeReason(lease: RunLease, trigger: PrimaryStopTrigger): TaskOutcome["reason"] {
+    if (needsFinalizer(trigger)) {
+      if (!this.deps.getFinalization().enabled) return "incomplete_protocol";
+      const camp = this.deps.storage.getCampaign(lease.campaign_id);
+      if (Date.now() > lease.deadline_ms) return "budget";
+      if (camp.spec.budget.deadline_ms != null && Date.now() > camp.spec.budget.deadline_ms) return "budget";
+      if (!this.deps.budget.canAdmit(lease.campaign_id, 1, 16, 0)) return "budget";
+      const uncertain = Number(
+        (
+          this.deps.storage.store.db
+            .prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND state = 'uncertain'")
+            .get(lease.run_id) as { c: number }
+        ).c,
+      );
+      if (uncertain > 0) return "protocol_error";
+      return "incomplete_protocol";
+    }
+    return frameworkReason(trigger);
+  }
+
+  private buildFinalizeContext(lease: RunLease, context: ContextPack, trigger: "natural_stop" | "turn_cap" | "tool_cap"): FinalizeContext {
+    const cfg = this.deps.getFinalization();
+    const stepRow = lease.step_id
+      ? (this.deps.storage.store.db
+          .prepare("SELECT question, completion_criteria, expected_observations_json FROM steps WHERE id = ?")
+          .get(lease.step_id) as
+          | { question: string; completion_criteria: string; expected_observations_json: string }
+          | undefined)
+      : undefined;
+    const ckpt = this.deps.storage.latestCheckpoint(lease.campaign_id);
+    const arts = this.deps.storage.store.db
+      .prepare("SELECT id FROM artifacts WHERE campaign_id = ? AND producer_attempt = ?")
+      .all(lease.campaign_id, lease.run_id) as { id: string }[];
+    const messages = this.agent?.state.messages ?? [];
+    return {
+      run_id: lease.run_id,
+      step_id: lease.step_id ?? "",
+      stop_trigger: trigger,
+      step: {
+        question: stepRow?.question ?? "",
+        completion_criteria: stepRow?.completion_criteria ?? "",
+        expected_observations: stepRow ? (JSON.parse(stepRow.expected_observations_json) as string[]) : [],
+      },
+      submitted: {
+        observation_ids: [...this.submittedObservations],
+        fact_ids: [...this.submittedFacts],
+        finding_ids: [...this.submittedFindings],
+        artifact_ids: arts.map((a) => a.id),
+      },
+      last_checkpoint: ckpt ? { note: String(ckpt.note ?? ""), next: ckpt.next ? String(ckpt.next) : null } : null,
+      last_assistant_text: lastAssistantText(messages).slice(0, cfg.transcript_tail_chars),
+      last_tool_results: lastToolPreviews(messages, cfg.tool_result_tail_count),
+    };
+  }
+
+  private finishStepTool(lease: RunLease, source: "primary" | "finalizer"): AgentTool {
+    return tool(
+      "finish_step",
+      "Required: end this execute fragment and free the slot. Call after progress, failure, truncated output, or cap. Checkpoint alone does not finish.",
+      Type.Object(
+        {
+          disposition: Type.Optional(
+            Type.Union([Type.Literal("resolved"), Type.Literal("deferred"), Type.Literal("blocked")]),
+          ),
+          reason: Type.Optional(Type.String()),
+          summary: Type.String({ minLength: 1, maxLength: 8000 }),
+          evidence_refs: Type.Optional(Type.Array(Type.String(), { maxItems: 128 })),
+          blocked_on: Type.Optional(Type.String()),
+          reopen_condition: Type.Optional(Type.String()),
+          next_action: Type.Optional(Type.String()),
+        },
+        { additionalProperties: false },
+      ),
+      async (callId, params) => {
+        const parsed = parseFinishInput(params);
+        if (!parsed.ok) {
+          this.deps.storage.appendEvent(
+            lease.campaign_id,
+            "run.finish_validation_error",
+            { run_id: lease.run_id, error: parsed.error, submission_id: callId },
+            { kind: "worker", id: lease.run_id },
+            lease.run_id,
+            callId,
+          );
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ error: parsed.error, finish: false }) }],
+            details: { error: parsed.error },
+            isError: true,
+          };
+        }
+        try {
+          const result = this.deps.storage.submitRunOutcome({
+            campaign_id: lease.campaign_id,
+            run_id: lease.run_id,
+            fence: lease.fence,
+            submission_id: callId,
+            payload: parsed.value,
+            observation_ids: [...this.submittedObservations],
+            fact_ids: [...this.submittedFacts],
+            finding_ids: [...this.submittedFindings],
+            source,
+          });
+          if (result.conflict) {
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify({ error: "finish_conflict", finish: false }) }],
+              details: { error: "finish_conflict", duplicate: false },
+              isError: true,
+            };
+          }
+          if (!result.accepted || !result.outcome) {
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify({ error: result.error ?? "finish_rejected", finish: false }) }],
+              details: { error: result.error ?? "finish_rejected" },
+              isError: true,
+            };
+          }
+          this.outcome = result.outcome;
+          return { ...ok({ finish: true, duplicate: result.duplicate, disposition: result.outcome.reason }), terminate: true };
+        } catch (err) {
+          const code = err instanceof DomainError ? err.code : "finish_error";
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ error: code, finish: false }) }],
+            details: { error: code },
+            isError: true,
+          };
+        }
+      },
+    );
   }
 
   async settle(): Promise<TaskOutcome> {
@@ -441,19 +728,7 @@ export class PiWorker implements WorkerRuntime {
         }), async (_id, _params) => {
           return ok(await packKaliExec(s, lease, this.deps.kali?.takeLast(lease.campaign_id), "no_playwright_result"));
         }),
-        tool("finish_step", "Required: end this execute fragment and free the slot. Call after progress, failure, truncated output, or cap. Checkpoint alone does not finish.", Type.Object({
-          reason: Type.String(),
-          summary: Type.String(),
-          blocked_on: Type.Optional(Type.String()),
-        }), async (_id, params) => {
-          s.markFinishRequested(lease.campaign_id, lease.run_id, lease.fence);
-          const p = params as { reason: TaskOutcome["reason"]; summary: string; blocked_on?: string };
-          const reason = (["resolved", "deferred", "blocked", "cancelled", "budget", "context_limit", "protocol_error", "incomplete_protocol"] as string[]).includes(p.reason)
-            ? (p.reason as TaskOutcome["reason"])
-            : "resolved";
-          this.outcome = this.makeOutcome(lease, reason, p.summary, true, p.blocked_on);
-          return { ...ok({ finish: true }), terminate: true };
-        }),
+        this.finishStepTool(lease, "primary"),
       );
     }
     const camp = s.getCampaign(lease.campaign_id);
@@ -556,6 +831,46 @@ export function artifactSlicePayload(args: {
     truncated: more,
     next_offset: more ? args.offset + args.byte_length : null,
   };
+}
+
+function lastAssistant(messages: unknown[]): { role?: string; stopReason?: string; content?: unknown } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as { role?: string; stopReason?: string; content?: unknown };
+    if (m.role === "assistant") return m;
+  }
+  return null;
+}
+
+function lastAssistantText(messages: unknown[]): string {
+  const m = lastAssistant(messages);
+  if (!m) return "";
+  const c = m.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    return (c as { type?: string; text?: string }[])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("");
+  }
+  return "";
+}
+
+function lastToolPreviews(
+  messages: unknown[],
+  limit: number,
+): Array<{ name: string; is_error: boolean; preview: string; artifact_id?: string }> {
+  const out: Array<{ name: string; is_error: boolean; preview: string; artifact_id?: string }> = [];
+  for (const raw of messages) {
+    const m = raw as { role?: string; toolName?: string; isError?: boolean; content?: { type: string; text?: string }[] };
+    if (m.role !== "toolResult") continue;
+    const text = (m.content ?? []).map((c) => c.text ?? "").join("");
+    out.push({
+      name: String(m.toolName ?? ""),
+      is_error: Boolean(m.isError),
+      preview: text.slice(0, 2000),
+    });
+  }
+  return out.slice(-Math.max(1, limit));
 }
 
 function isEnvTool(name: string): boolean {

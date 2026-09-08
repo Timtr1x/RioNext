@@ -29,6 +29,18 @@ import type {
   WakeCondition,
   WorkerMode,
 } from "../domain/types.ts";
+import {
+  canonicalizeFinishPayload,
+  incompleteReopenRule,
+  isSemanticDisposition,
+  parseFinishInput,
+  stepRequiresEvidence,
+  type FinishPayload,
+  type FinalizationStats,
+  type PrimaryStopTrigger,
+  type SubmitRunOutcomeArgs,
+  type SubmitRunOutcomeResult,
+} from "../contracts/finalization.ts";
 import { SCHEMA_VERSION } from "../version.ts";
 import { pickFairReadyStep } from "../scheduler/fair.ts";
 import { ArtifactStore, type StoredArtifact } from "./artifacts.ts";
@@ -113,6 +125,7 @@ export class StorageService {
 
   recoverStaleRuns(campaignId: string): number {
     return this.store.transaction(() => {
+      const recoveredFinishes = this.recoverPendingFinishesTx(campaignId);
       const now = Date.now();
       const stale = this.store.db
         .prepare(
@@ -120,6 +133,7 @@ export class StorageService {
         )
         .all(campaignId, now) as { id: string; step_id: string | null; mode: string }[];
       const iso = nowIso();
+      let n = recoveredFinishes;
       for (const run of stale) {
         this.store.db
           .prepare("UPDATE task_runs SET state = 'lease_expired', end_reason = 'controller_takeover', updated_at = ? WHERE id = ?")
@@ -134,9 +148,39 @@ export class StorageService {
               .run(run.step_id);
           }
         }
+        n += 1;
       }
-      return stale.length;
+      return n;
     });
+  }
+
+  recoverPendingFinishes(campaignId: string): number {
+    return this.store.transaction(() => this.recoverPendingFinishesTx(campaignId));
+  }
+
+  private recoverPendingFinishesTx(campaignId: string): number {
+    const pending = this.store.db
+      .prepare(
+        "SELECT * FROM task_runs WHERE campaign_id = ? AND mode = 'execute' AND state IN ('claimed','running')",
+      )
+      .all(campaignId) as Record<string, unknown>[];
+    let n = 0;
+    for (const run of pending) {
+      const runId = String(run.id);
+      const payloadJson = run.finish_payload_json ? String(run.finish_payload_json) : "";
+      if (payloadJson) {
+        const outcome = this.outcomeFromFinishPayload(run, payloadJson);
+        this.finishRun(campaignId, runId, outcome);
+        n += 1;
+        continue;
+      }
+      if (Number(run.finish_requested) === 1 || Number(run.finalize_attempted) === 1) {
+        const outcome = this.frameworkRunOutcome(run, "incomplete_protocol", "missing finish payload");
+        this.finishRun(campaignId, runId, outcome);
+        n += 1;
+      }
+    }
+    return n;
   }
 
   createCampaign(spec: CampaignSpec): CampaignRecord {
@@ -1115,30 +1159,50 @@ export class StorageService {
         | Record<string, unknown>
         | undefined;
       if (!run) throw invalidInput("run_not_found", "run not found");
+      if (String(run.state) === "finished") return;
+      let applied = outcome;
+      if (run.finish_payload_json && run.mode === "execute") {
+        applied = this.outcomeFromFinishPayload(run, String(run.finish_payload_json));
+      }
       const now = nowIso();
       this.store.db
         .prepare("UPDATE task_runs SET state = 'finished', end_reason = ?, outcome_json = ?, updated_at = ? WHERE id = ?")
-        .run(outcome.reason, asJson(outcome), now, runId);
+        .run(applied.reason, asJson(applied), now, runId);
       if (run.mode === "decide") {
         this.store.db.prepare("UPDATE campaigns SET decide_lock_owner = NULL, updated_at = ? WHERE id = ?").run(now, campaignId);
       } else {
         this.store.db.prepare("UPDATE campaigns SET execute_lock_owner = NULL, updated_at = ? WHERE id = ?").run(now, campaignId);
         const stepId = run.step_id as string | null;
         if (stepId) {
-          const next = outcomeToStepStatus(outcome.reason);
-          const step = this.store.db.prepare("SELECT status FROM steps WHERE id = ?").get(stepId) as { status: StepStatus };
+          const next = outcomeToStepStatus(applied.reason);
+          const step = this.store.db.prepare("SELECT status, revision FROM steps WHERE id = ?").get(stepId) as {
+            status: StepStatus;
+            revision: number;
+          };
           if (step.status === "running" || step.status === "leased") {
             transitionStep(step.status === "leased" ? "running" : "running", next);
-            this.store.db
-              .prepare("UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?, ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END, revision = revision + 1 WHERE id = ?")
-              .run(next, outcome.blocked_on, outcome.summary, next, now, stepId);
+            const reopenJson =
+              applied.reason === "incomplete_protocol" ? asJson(incompleteReopenRule()) : null;
+            if (reopenJson) {
+              this.store.db
+                .prepare(
+                  "UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?, reopen_rule_json = ?, ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END, revision = revision + 1 WHERE id = ?",
+                )
+                .run(next, applied.blocked_on, applied.summary, reopenJson, next, now, stepId);
+            } else {
+              this.store.db
+                .prepare(
+                  "UPDATE steps SET status = ?, blocked_reason = ?, last_failure = ?, ready_since = CASE WHEN ? = 'ready' THEN ? ELSE ready_since END, revision = revision + 1 WHERE id = ?",
+                )
+                .run(next, applied.blocked_on, applied.summary, next, now, stepId);
+            }
             if (next === "ready") {
               this.appendEvent(campaignId, "step.ready", { step_id: stepId }, { kind: "controller", id: "scheduler" }, stepId);
             }
           }
         }
       }
-      this.appendEvent(campaignId, "run.finished", { run_id: runId, outcome }, { kind: "controller", id: "engine" }, runId);
+      this.appendEvent(campaignId, "run.finished", { run_id: runId, outcome: applied }, { kind: "controller", id: "engine" }, runId);
       if (run.mode !== "decide") {
         this.markRequested(campaignId, this.getCampaign(campaignId).event_head);
       }
@@ -1155,6 +1219,259 @@ export class StorageService {
     this.store.db
       .prepare("UPDATE task_runs SET finish_requested = 1, env_admission = 0, updated_at = ? WHERE id = ?")
       .run(nowIso(), runId);
+  }
+
+  submitRunOutcome(args: SubmitRunOutcomeArgs): SubmitRunOutcomeResult {
+    return this.store.transaction(() => {
+      const run = this.store.db.prepare("SELECT * FROM task_runs WHERE id = ? AND campaign_id = ?").get(args.run_id, args.campaign_id) as
+        | Record<string, unknown>
+        | undefined;
+      if (!run) throw invalidInput("run_not_found", "run not found");
+      if (Number(run.fence) !== args.fence) {
+        throw denied("stale_fence", "finish rejected due to stale fence");
+      }
+      const parsed = parseFinishInput(args.payload);
+      if (!parsed.ok) {
+        this.appendEvent(
+          args.campaign_id,
+          "run.finish_validation_error",
+          { run_id: args.run_id, error: parsed.error, submission_id: args.submission_id },
+          { kind: "worker", id: args.run_id },
+          args.run_id,
+          args.submission_id,
+        );
+        return { accepted: false, duplicate: false, conflict: false, outcome: null, error: parsed.error };
+      }
+      const evidenceErr = this.validateFinishEvidence(args.campaign_id, args.run_id, parsed.value);
+      if (evidenceErr) {
+        this.appendEvent(
+          args.campaign_id,
+          "run.finish_validation_error",
+          { run_id: args.run_id, error: evidenceErr, submission_id: args.submission_id },
+          { kind: "worker", id: args.run_id },
+          args.run_id,
+          args.submission_id,
+        );
+        return { accepted: false, duplicate: false, conflict: false, outcome: null, error: evidenceErr };
+      }
+      const stored = run.finish_payload_json ? (fromJson<FinishPayload>(String(run.finish_payload_json), null as unknown as FinishPayload) as FinishPayload | null) : null;
+      if (stored) {
+        const same = canonicalizeFinishPayload(stored) === canonicalizeFinishPayload(parsed.value);
+        if (same) {
+          const outcome = this.outcomeFromFinishPayload(run, String(run.finish_payload_json));
+          return { accepted: true, duplicate: true, conflict: false, outcome };
+        }
+        this.appendEvent(
+          args.campaign_id,
+          "run.finish_conflict",
+          { run_id: args.run_id, submission_id: args.submission_id },
+          { kind: "worker", id: args.run_id },
+          args.run_id,
+          args.submission_id,
+        );
+        return {
+          accepted: false,
+          duplicate: false,
+          conflict: true,
+          outcome: this.outcomeFromFinishPayload(run, String(run.finish_payload_json)),
+          error: "finish_conflict",
+        };
+      }
+      if (String(run.state) !== "running" && String(run.state) !== "claimed") {
+        return { accepted: false, duplicate: false, conflict: false, outcome: null, error: "run_not_running" };
+      }
+      const payload: FinishPayload = {
+        ...parsed.value,
+        submission_id: args.submission_id,
+        observation_ids: args.observation_ids,
+        fact_ids: args.fact_ids,
+        finding_ids: args.finding_ids,
+        source: args.source,
+      };
+      const now = nowIso();
+      this.store.db
+        .prepare(
+          "UPDATE task_runs SET finish_requested = 1, env_admission = 0, finish_submission_id = ?, finish_payload_json = ?, finish_submitted_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(args.submission_id, asJson(payload), now, now, args.run_id);
+      this.appendEvent(
+        args.campaign_id,
+        "run.finish_submitted",
+        {
+          run_id: args.run_id,
+          step_id: run.step_id,
+          trigger: args.source,
+          submission_id: args.submission_id,
+          disposition: parsed.value.disposition,
+        },
+        { kind: "worker", id: args.run_id },
+        args.run_id,
+        args.submission_id,
+      );
+      if (parsed.usedLegacyReason) {
+        this.appendEvent(
+          args.campaign_id,
+          "run.finish_reason_alias",
+          { run_id: args.run_id, submission_id: args.submission_id },
+          { kind: "worker", id: args.run_id },
+          args.run_id,
+        );
+      }
+      const outcome = this.outcomeFromFinishPayload(this.getRun(args.run_id), asJson(payload));
+      return { accepted: true, duplicate: false, conflict: false, outcome };
+    });
+  }
+
+  recordPrimaryStop(campaignId: string, runId: string, trigger: PrimaryStopTrigger, stepId: string | null): void {
+    this.store.db.prepare("UPDATE task_runs SET primary_stop_trigger = ?, updated_at = ? WHERE id = ?").run(trigger, nowIso(), runId);
+    this.appendEvent(
+      campaignId,
+      "run.primary_stopped",
+      { run_id: runId, step_id: stepId, trigger },
+      { kind: "worker", id: runId },
+      runId,
+    );
+  }
+
+  beginFinalization(campaignId: string, runId: string, trigger: PrimaryStopTrigger, stepId: string | null): void {
+    this.store.db
+      .prepare("UPDATE task_runs SET finalize_attempted = 1, primary_stop_trigger = ?, updated_at = ? WHERE id = ?")
+      .run(trigger, nowIso(), runId);
+    this.appendEvent(
+      campaignId,
+      "run.finalization_started",
+      { run_id: runId, step_id: stepId, trigger },
+      { kind: "controller", id: "engine" },
+      runId,
+    );
+  }
+
+  markFinalizationFailed(campaignId: string, runId: string, error: string, stepId: string | null): void {
+    this.appendEvent(
+      campaignId,
+      "run.finalization_failed",
+      { run_id: runId, step_id: stepId, error },
+      { kind: "controller", id: "engine" },
+      runId,
+    );
+  }
+
+  evidenceExists(campaignId: string, id: string): { ok: boolean; error?: string } {
+    const tables = ["observations", "facts", "findings", "artifacts"] as const;
+    for (const t of tables) {
+      const row = this.store.db.prepare(`SELECT campaign_id FROM ${t} WHERE id = ?`).get(id) as { campaign_id: string } | undefined;
+      if (row) {
+        if (row.campaign_id !== campaignId) return { ok: false, error: "cross_campaign_evidence" };
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: "unknown_evidence" };
+  }
+
+  finalizationStats(campaignId: string): FinalizationStats {
+    const execute_runs_total = Number(
+      (this.store.db.prepare("SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'execute'").get(campaignId) as { c: number }).c,
+    );
+    const finish_primary_total = this.countEvents(campaignId, "run.finish_submitted", (p) => p.trigger === "primary");
+    const finalizer_started_total = this.countEvents(campaignId, "run.finalization_started");
+    const finalizer_committed_total = this.countEvents(campaignId, "run.finish_submitted", (p) => p.trigger === "finalizer");
+    const finalizer_failed_total = this.countEvents(campaignId, "run.finalization_failed");
+    const incomplete_protocol_total = Number(
+      (this.store.db
+        .prepare("SELECT COUNT(*) AS c FROM task_runs WHERE campaign_id = ? AND mode = 'execute' AND end_reason = 'incomplete_protocol'")
+        .get(campaignId) as { c: number }).c,
+    );
+    const finish_conflict_total = this.countEvents(campaignId, "run.finish_conflict");
+    const finish_validation_error_total = this.countEvents(campaignId, "run.finish_validation_error");
+    const div = (a: number, b: number): number | null => (b === 0 ? null : a / b);
+    return {
+      execute_runs_total,
+      finish_primary_total,
+      finalizer_started_total,
+      finalizer_committed_total,
+      finalizer_failed_total,
+      incomplete_protocol_total,
+      finish_conflict_total,
+      finish_validation_error_total,
+      primary_finish_rate: div(finish_primary_total, execute_runs_total),
+      finalizer_success_rate: div(finalizer_committed_total, finalizer_started_total),
+      protocol_complete_rate: div(finish_primary_total + finalizer_committed_total, execute_runs_total),
+    };
+  }
+
+  private countEvents(campaignId: string, type: string, pred?: (p: Record<string, unknown>) => boolean): number {
+    const rows = this.store.db
+      .prepare("SELECT payload_json FROM events WHERE campaign_id = ? AND type = ?")
+      .all(campaignId, type) as { payload_json: string }[];
+    if (!pred) return rows.length;
+    return rows.filter((r) => pred(fromJson(r.payload_json, {}))).length;
+  }
+
+  private validateFinishEvidence(campaignId: string, runId: string, input: { disposition: string; evidence_refs: string[] }): string | null {
+    const run = this.getRun(runId);
+    const stepId = run.step_id ? String(run.step_id) : null;
+    let requires = true;
+    if (stepId) {
+      const step = this.store.db
+        .prepare("SELECT completion_criteria, expected_observations_json FROM steps WHERE id = ?")
+        .get(stepId) as { completion_criteria: string; expected_observations_json: string } | undefined;
+      if (step) {
+        requires = stepRequiresEvidence(step.completion_criteria, fromJson(step.expected_observations_json, []));
+      }
+    }
+    if (input.disposition === "resolved" && requires && input.evidence_refs.length === 0) {
+      return "resolved_requires_evidence";
+    }
+    for (const id of input.evidence_refs) {
+      const hit = this.evidenceExists(campaignId, id);
+      if (!hit.ok) return hit.error ?? "unknown_evidence";
+    }
+    return null;
+  }
+
+  private outcomeFromFinishPayload(run: Record<string, unknown>, payloadJson: string): TaskOutcome {
+    const payload = fromJson<FinishPayload>(payloadJson, {
+      disposition: "deferred",
+      summary: "invalid payload",
+      evidence_refs: [],
+      submission_id: "",
+      observation_ids: [],
+      fact_ids: [],
+      finding_ids: [],
+      source: "primary",
+    });
+    const reason = isSemanticDisposition(payload.disposition) ? payload.disposition : "incomplete_protocol";
+    return {
+      run_id: String(run.id),
+      step_id: run.step_id ? String(run.step_id) : null,
+      mode: run.mode === "decide" ? "decide" : "execute",
+      reason,
+      summary: payload.summary,
+      observation_ids: payload.observation_ids ?? [],
+      fact_ids: payload.fact_ids ?? [],
+      finding_ids: payload.finding_ids ?? [],
+      blocked_on: payload.blocked_on ?? null,
+      reopen_rule: reason === "incomplete_protocol" ? incompleteReopenRule() : null,
+      finish_requested: true,
+      protocol_error: null,
+    };
+  }
+
+  private frameworkRunOutcome(run: Record<string, unknown>, reason: TaskOutcome["reason"], summary: string): TaskOutcome {
+    return {
+      run_id: String(run.id),
+      step_id: run.step_id ? String(run.step_id) : null,
+      mode: run.mode === "decide" ? "decide" : "execute",
+      reason,
+      summary,
+      observation_ids: [],
+      fact_ids: [],
+      finding_ids: [],
+      blocked_on: null,
+      reopen_rule: reason === "incomplete_protocol" ? incompleteReopenRule() : null,
+      finish_requested: Number(run.finish_requested) === 1,
+      protocol_error: reason === "protocol_error" || reason === "incomplete_protocol" ? summary : null,
+    };
   }
 
   envAdmissionOpen(runId: string): boolean {

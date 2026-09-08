@@ -98,6 +98,8 @@ export class Engine {
         execute: this.config.max_execute_turns_per_run,
         tools: this.config.max_tool_calls_per_run,
       }),
+      getFinalization: () => this.config.finalization,
+      budget: this.budget,
       kali: this.kali,
       liveStream: live?.stream,
     });
@@ -630,6 +632,7 @@ export class Engine {
       residual,
       pending_goal_claim: this.storage.pendingGoalClaim(campaignId),
       root_goal_satisfied: rootGoalSatisfied(camp.spec, this.storage, campaignId, this.storage.getWorld<LabWorld>(campaignId, freshWorld())),
+      finalization: this.storage.finalizationStats(campaignId),
     };
   }
 

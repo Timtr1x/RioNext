@@ -35,6 +35,23 @@ export function formatStatus(s: Record<string, unknown>): string {
   if (s.candidates_ready != null) lines.push(`ready steps   ${s.candidates_ready}`);
   const run = s.active_run as { id?: string; mode?: string; state?: string } | null;
   if (run) lines.push(`active run    ${run.mode} ${run.state} ${run.id}`);
+  const fin = s.finalization as
+    | {
+        primary_finish_rate: number | null;
+        finalizer_success_rate: number | null;
+        protocol_complete_rate: number | null;
+        execute_runs_total?: number;
+        finish_primary_total?: number;
+        finalizer_started_total?: number;
+        finalizer_committed_total?: number;
+      }
+    | undefined;
+  if (fin) {
+    const pct = (n: number | null): string => (n == null ? "n/a" : `${(n * 100).toFixed(1)}%`);
+    lines.push(`主动交卷率   ${pct(fin.primary_finish_rate)}  (${fin.finish_primary_total ?? 0}/${fin.execute_runs_total ?? 0})`);
+    lines.push(`补交成功率   ${pct(fin.finalizer_success_rate)}  (${fin.finalizer_committed_total ?? 0}/${fin.finalizer_started_total ?? 0})`);
+    lines.push(`最终协议完整率 ${pct(fin.protocol_complete_rate)}`);
+  }
   return lines.join("\n");
 }
 

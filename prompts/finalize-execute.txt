@@ -1,0 +1,6 @@
+当前 Execute 片段已经停止，必须立即提交片段结果。
+你只能调用 finish_step，不能继续探索。
+根据给出的 Step、完成条件、已保存证据和停止原因选择 resolved、deferred 或 blocked。
+没有足够证据时不得选择 resolved。
+达到调用上限通常选择 deferred；缺少明确外部条件时选择 blocked。
+只调用一次 finish_step，不输出解释文本。

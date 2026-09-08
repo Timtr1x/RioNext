@@ -1,0 +1,213 @@
+import type { TaskOutcome, TaskOutcomeReason, WakeCondition } from "../domain/types.ts";
+
+export type WorkerPhase = "primary" | "finalizing" | "settled";
+
+export type PrimaryStopTrigger =
+  | "finish_committed"
+  | "natural_stop"
+  | "turn_cap"
+  | "tool_cap"
+  | "budget_exhausted"
+  | "deadline"
+  | "cancelled"
+  | "stale_fence"
+  | "model_error"
+  | "aborted"
+  | "runtime_error";
+
+export type ModelStepDisposition = "resolved" | "deferred" | "blocked";
+
+export const SEMANTIC_DISPOSITIONS: readonly ModelStepDisposition[] = ["resolved", "deferred", "blocked"];
+
+export interface FinishStepInput {
+  disposition: ModelStepDisposition;
+  summary: string;
+  evidence_refs: string[];
+  blocked_on?: string;
+  reopen_condition?: string;
+  next_action?: string;
+}
+
+export interface FinishPayload extends FinishStepInput {
+  submission_id: string;
+  observation_ids: string[];
+  fact_ids: string[];
+  finding_ids: string[];
+  source: "primary" | "finalizer";
+}
+
+export interface SubmitRunOutcomeArgs {
+  campaign_id: string;
+  run_id: string;
+  fence: number;
+  submission_id: string;
+  payload: FinishStepInput;
+  observation_ids: string[];
+  fact_ids: string[];
+  finding_ids: string[];
+  source: "primary" | "finalizer";
+}
+
+export interface SubmitRunOutcomeResult {
+  accepted: boolean;
+  duplicate: boolean;
+  conflict: boolean;
+  outcome: TaskOutcome | null;
+  error?: string;
+}
+
+export interface FinalizeContext {
+  run_id: string;
+  step_id: string;
+  stop_trigger: "natural_stop" | "turn_cap" | "tool_cap";
+  step: {
+    question: string;
+    completion_criteria: string;
+    expected_observations: string[];
+  };
+  submitted: {
+    observation_ids: string[];
+    fact_ids: string[];
+    finding_ids: string[];
+    artifact_ids: string[];
+  };
+  last_checkpoint: null | { note: string; next: string | null };
+  last_assistant_text: string;
+  last_tool_results: Array<{
+    name: string;
+    is_error: boolean;
+    preview: string;
+    artifact_id?: string;
+  }>;
+}
+
+export interface FinalizationConfig {
+  enabled: boolean;
+  max_attempts: 1;
+  max_output_tokens: number;
+  transcript_tail_chars: number;
+  tool_result_tail_count: number;
+}
+
+export const DEFAULT_FINALIZATION: FinalizationConfig = {
+  enabled: false,
+  max_attempts: 1,
+  max_output_tokens: 512,
+  transcript_tail_chars: 4000,
+  tool_result_tail_count: 8,
+};
+
+export function parseLegacyReason(reason: unknown): ModelStepDisposition | null {
+  if (reason === "resolved" || reason === "deferred" || reason === "blocked") return reason;
+  return null;
+}
+
+export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInput; usedLegacyReason: boolean } | { ok: false; error: string } {
+  if (!raw || typeof raw !== "object") return { ok: false, error: "finish_payload_invalid" };
+  const p = raw as Record<string, unknown>;
+  let usedLegacyReason = false;
+  let disposition: ModelStepDisposition | null = null;
+  if (p.disposition != null) {
+    if (p.disposition === "resolved" || p.disposition === "deferred" || p.disposition === "blocked") {
+      disposition = p.disposition;
+    } else {
+      return { ok: false, error: `illegal_disposition:${String(p.disposition)}` };
+    }
+  } else if (p.reason != null) {
+    usedLegacyReason = true;
+    disposition = parseLegacyReason(p.reason);
+    if (!disposition) return { ok: false, error: `illegal_reason:${String(p.reason)}` };
+  } else {
+    return { ok: false, error: "missing_disposition" };
+  }
+  if (typeof p.summary !== "string" || p.summary.length < 1 || p.summary.length > 8000) {
+    return { ok: false, error: "summary_required" };
+  }
+  const evidence_refs = Array.isArray(p.evidence_refs)
+    ? p.evidence_refs.filter((x): x is string => typeof x === "string")
+    : [];
+  if (evidence_refs.length > 128) return { ok: false, error: "evidence_refs_limit" };
+  const blocked_on = typeof p.blocked_on === "string" && p.blocked_on.length > 0 ? p.blocked_on : undefined;
+  const reopen_condition =
+    typeof p.reopen_condition === "string" && p.reopen_condition.length > 0 ? p.reopen_condition : undefined;
+  const next_action = typeof p.next_action === "string" && p.next_action.length > 0 ? p.next_action : undefined;
+  if (disposition === "blocked" && !blocked_on) return { ok: false, error: "blocked_requires_blocked_on" };
+  if (disposition === "deferred" && !reopen_condition && !next_action) {
+    return { ok: false, error: "deferred_requires_reopen_or_next" };
+  }
+  return {
+    ok: true,
+    usedLegacyReason,
+    value: {
+      disposition,
+      summary: p.summary,
+      evidence_refs,
+      blocked_on,
+      reopen_condition,
+      next_action,
+    },
+  };
+}
+
+export function canonicalizeFinishPayload(p: FinishStepInput): string {
+  return JSON.stringify({
+    disposition: p.disposition,
+    summary: p.summary,
+    evidence_refs: [...p.evidence_refs].sort(),
+    blocked_on: p.blocked_on ?? null,
+    reopen_condition: p.reopen_condition ?? null,
+    next_action: p.next_action ?? null,
+  });
+}
+
+export function needsFinalizer(trigger: PrimaryStopTrigger): boolean {
+  return trigger === "natural_stop" || trigger === "turn_cap" || trigger === "tool_cap";
+}
+
+export function isSemanticDisposition(reason: string): reason is ModelStepDisposition {
+  return reason === "resolved" || reason === "deferred" || reason === "blocked";
+}
+
+export function frameworkReason(trigger: PrimaryStopTrigger): TaskOutcomeReason {
+  switch (trigger) {
+    case "natural_stop":
+    case "turn_cap":
+    case "tool_cap":
+      return "incomplete_protocol";
+    case "budget_exhausted":
+    case "deadline":
+      return "budget";
+    case "cancelled":
+    case "aborted":
+      return "cancelled";
+    case "finish_committed":
+      return "resolved";
+    default:
+      return "protocol_error";
+  }
+}
+
+export function incompleteReopenRule(): WakeCondition {
+  return { kind: "never" };
+}
+
+export function stepRequiresEvidence(completionCriteria: string, expectedObservations: unknown): boolean {
+  const criteria = completionCriteria.trim().toLowerCase();
+  if (criteria === "none" || criteria === "no_evidence" || criteria === "n/a") return false;
+  void expectedObservations;
+  return true;
+}
+
+export interface FinalizationStats {
+  execute_runs_total: number;
+  finish_primary_total: number;
+  finalizer_started_total: number;
+  finalizer_committed_total: number;
+  finalizer_failed_total: number;
+  incomplete_protocol_total: number;
+  finish_conflict_total: number;
+  finish_validation_error_total: number;
+  primary_finish_rate: number | null;
+  finalizer_success_rate: number | null;
+  protocol_complete_rate: number | null;
+}

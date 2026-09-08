@@ -432,7 +432,7 @@ test("T16 new run rebuilds from structured state not Pi history", async () => {
     }
     return {
       type: "tool_calls",
-      calls: [{ name: "finish_step", arguments: { reason: "deferred", summary: "t16-last-failure" } }],
+      calls: [{ name: "finish_step", arguments: { reason: "deferred", summary: "t16-last-failure", next_action: "rebuild from sqlite" } }],
     };
   };
   const e = engine(dir(), { chooseDecide: oneStepDecide("t16 memory step"), chooseExecute, maxCycles: 4 });
@@ -495,6 +495,18 @@ test("T16 new run rebuilds from structured state not Pi history", async () => {
 test("T17 run stop on turn cap keeps observations", async () => {
   const chooseExecute: TurnChooser = (ctx) => {
     const names = toolResultNames(ctx.messages);
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "deferred", summary: "capped", next_action: "continue after cap" },
+          },
+        ],
+      };
+    }
     if (!names.includes("submit_observation")) {
       return {
         type: "tool_calls",
@@ -508,13 +520,15 @@ test("T17 run stop on turn cap keeps observations", async () => {
   };
   const e = engine(dir(), { chooseDecide: oneStepDecide("t17 cap step"), chooseExecute });
   e.config.max_execute_turns_per_run = 1;
+  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("t17");
   e.createCampaign(spec);
   await e.runDecide(spec.campaign_id);
   const outcome = await e.runExecuteSlot(spec.campaign_id);
   assert.ok(outcome);
-  assert.equal(outcome.finish_requested, false);
-  assert.equal(outcome.reason, "incomplete_protocol");
+  assert.equal(outcome.reason, "deferred");
+  assert.equal(outcome.finish_requested, true);
+  assert.equal(e.lastWorker?.finalizerModelSends, 1);
   assert.ok(outcome.observation_ids.length >= 1, "turn cap must not drop submitted observation ids");
   const obsId = outcome.observation_ids[0]!;
   const rows = e.storage.list("observations", spec.campaign_id);
@@ -550,7 +564,7 @@ test("T19 finish then env tool is not dispatched", async () => {
   const chooseExecute: TurnChooser = () => ({
     type: "tool_calls",
     calls: [
-      { name: "finish_step", arguments: { reason: "resolved", summary: "done" } },
+      { name: "finish_step", arguments: { reason: "deferred", summary: "done", next_action: "stop env" } },
       { name: "world_act", arguments: { action: "open_cabinet" } },
     ],
   });
@@ -648,3 +662,677 @@ test("T22 child process boundary reload", () => {
   assert.ok(e.storage.list("observations", camp.id).length >= 1);
   e.close();
 });
+
+function obsIdFrom(ctx: { messages: unknown[] }): string | undefined {
+  for (const raw of ctx.messages) {
+    const m = raw as { role?: string; toolName?: string; content?: { text?: string }[] };
+    if (m.role !== "toolResult" || m.toolName !== "submit_observation") continue;
+    try {
+      const parsed = JSON.parse((m.content ?? []).map((c) => c.text ?? "").join("")) as {
+        canonical_ids?: { observation_id?: string };
+      };
+      if (parsed.canonical_ids?.observation_id) return parsed.canonical_ids.observation_id;
+    } catch {
+      // ignore
+    }
+  }
+  return undefined;
+}
+
+function seedReadyStep(e: Engine, campaignId: string, question: string, fingerprint: string): void {
+  const decide = e.storage.claimDecide(campaignId, "seed")!;
+  const root = String(e.storage.list("goals", campaignId)[0]!.id);
+  e.storage.proposeStepDirect({
+    campaign_id: campaignId,
+    producer_id: "seed",
+    submission_id: `seed-${fingerprint}`,
+    run_id: decide.run_id,
+    question,
+    kind: "explore",
+    goal_refs: [root],
+    preconditions: { op: "all", of: [] },
+    method_family: "f-protocol",
+    expected_observations: ["marker"],
+    completion_criteria: "observe",
+    fingerprint,
+    reopen_rule: { kind: "always" },
+  });
+  e.storage.finishRun(campaignId, decide.run_id, {
+    run_id: decide.run_id,
+    step_id: null,
+    mode: "decide",
+    reason: "resolved",
+    summary: "seeded",
+    observation_ids: [],
+    fact_ids: [],
+    finding_ids: [],
+    blocked_on: null,
+    reopen_rule: null,
+    finish_requested: true,
+    protocol_error: null,
+  });
+}
+
+function legalResolvedChooser(): TurnChooser {
+  return (ctx) => {
+    const names = toolResultNames(ctx.messages);
+    if (!names.includes("submit_observation")) {
+      return {
+        type: "tool_calls",
+        calls: [{ name: "submit_observation", arguments: { subject: "f-ev", body: { ok: true } } }],
+      };
+    }
+    const obs = obsIdFrom(ctx);
+    return {
+      type: "tool_calls",
+      calls: [
+        {
+          name: "finish_step",
+          arguments: { disposition: "resolved", summary: "legal primary finish", evidence_refs: obs ? [obs] : [] },
+        },
+      ],
+    };
+  };
+}
+
+test("F01 primary legal finish does not start Finalize", async () => {
+  const e = engine(dir(), { chooseExecute: legalResolvedChooser() });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f01");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f01 step", "f01-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "resolved");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  const step = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.equal(step.status, "resolved");
+  const started = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finalization_started");
+  assert.equal(started.length, 0);
+  e.close();
+});
+
+test("F02 natural stop Finalize resolved", async () => {
+  let e: Engine;
+  const spec = loadDemoSpec("f02");
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      const ids = e.storage.list("observations", spec.campaign_id).map((o) => String(o.id));
+      return {
+        type: "tool_calls",
+        calls: [{ name: "finish_step", arguments: { disposition: "resolved", summary: "repaired", evidence_refs: ids } }],
+      };
+    }
+    if (!toolResultNames(ctx.messages).includes("submit_observation")) {
+      return {
+        type: "tool_calls",
+        calls: [{ name: "submit_observation", arguments: { subject: "f02", body: { n: 1 } } }],
+      };
+    }
+    return { type: "text", text: "stopping without finish" };
+  };
+  e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f02 step", "f02-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "resolved");
+  assert.equal(e.lastWorker?.finalizerModelSends, 1);
+  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F03 Finalize deferred with next_action", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "deferred", summary: "cap deferred", next_action: "try another path" },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "hit cap soon" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f03");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f03 step", "f03-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "deferred");
+  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "deferred");
+  e.close();
+});
+
+test("F04 Finalize blocked with blocked_on", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "blocked", summary: "need key", blocked_on: "missing_key" },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "cannot proceed" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f04");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f04 step", "f04-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "blocked");
+  assert.equal(outcome.blocked_on, "missing_key");
+  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "blocked");
+  e.close();
+});
+
+test("F05 tool cap still admits Finalize finish_step", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "deferred", summary: "after cap", next_action: "resume" },
+          },
+        ],
+      };
+    }
+    return { type: "tool_calls", calls: [{ name: "world_inspect", arguments: { target: "desk" } }] };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.config.max_tool_calls_per_run = 1;
+  const spec = loadDemoSpec("f05");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f05 step", "f05-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "deferred");
+  assert.equal(outcome.finish_requested, true);
+  e.close();
+});
+
+test("F06 turn cap leaves a separate Finalize model call", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [
+          {
+            name: "finish_step",
+            arguments: { disposition: "deferred", summary: "turn capped", next_action: "next fragment" },
+          },
+        ],
+      };
+    }
+    return { type: "text", text: "turn 1" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f06");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f06 step", "f06-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(e.lastWorker?.finalizerModelSends, 1);
+  assert.ok((e.lastWorker?.modelGateway?.modelSends ?? 0) >= 2);
+  assert.equal(outcome.reason, "deferred");
+  e.close();
+});
+
+test("F07 Finalize rejects env tools", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return {
+        type: "tool_calls",
+        calls: [{ name: "kali_run", arguments: { kind: "kali", bin: "nmap", args: ["-h"] } }],
+      };
+    }
+    return { type: "text", text: "natural" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f07");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f07 step", "f07-fp");
+  const envBefore = 0;
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  assert.equal(e.lastWorker?.toolGateway?.envSends ?? 0, envBefore);
+  e.close();
+});
+
+test("F08 Finalize text only is incomplete with no third model turn", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return { type: "text", text: "cannot submit" };
+    }
+    return { type: "text", text: "primary stop" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f08");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f08 step", "f08-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  assert.equal(e.lastWorker?.finalizerModelSends, 1);
+  assert.equal(e.lastWorker?.modelGateway?.modelSends, 2);
+  e.close();
+});
+
+test("F09 duplicate finish is idempotent; different payload conflicts", async () => {
+  const chooseExecute: TurnChooser = () => ({
+    type: "tool_calls",
+    calls: [
+      {
+        name: "finish_step",
+        arguments: { disposition: "deferred", summary: "first", next_action: "hold" },
+      },
+      {
+        name: "finish_step",
+        arguments: { disposition: "deferred", summary: "first", next_action: "hold" },
+      },
+      {
+        name: "finish_step",
+        arguments: { disposition: "blocked", summary: "second", blocked_on: "other" },
+      },
+    ],
+  });
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f09");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f09 step", "f09-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "deferred");
+  assert.equal(outcome.summary, "first");
+  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "deferred");
+  const conflicts = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finish_conflict");
+  assert.ok(conflicts.length >= 1);
+  e.close();
+});
+
+test("F10 illegal disposition is not resolved", async () => {
+  for (const bad of ["done", "success", "protocol_error"]) {
+    const e = engine(dir(), {
+      chooseExecute: () => ({
+        type: "tool_calls",
+        calls: [{ name: "finish_step", arguments: { reason: bad, summary: "nope" } }],
+      }),
+    });
+    e.config.max_execute_turns_per_run = 1;
+    const spec = loadDemoSpec(`f10-${bad}`);
+    e.createCampaign(spec);
+    seedReadyStep(e, spec.campaign_id, "f10 step", `f10-${bad}`);
+    const outcome = await e.runExecuteSlot(spec.campaign_id);
+    assert.ok(outcome);
+    assert.notEqual(outcome.reason, "resolved");
+    assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "deferred");
+    e.close();
+  }
+});
+
+test("F11 resolved without evidence is rejected", async () => {
+  const e = engine(dir(), {
+    chooseExecute: () => ({
+      type: "tool_calls",
+      calls: [{ name: "finish_step", arguments: { disposition: "resolved", summary: "no refs", evidence_refs: [] } }],
+    }),
+  });
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f11");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f11 step", "f11-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "resolved");
+  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F12 forged and cross-campaign evidence are rejected", async () => {
+  let evidence = "obs_does_not_exist";
+  const e = engine(dir(), {
+    chooseExecute: () => ({
+      type: "tool_calls",
+      calls: [
+        {
+          name: "finish_step",
+          arguments: { disposition: "resolved", summary: "bad evidence", evidence_refs: [evidence] },
+        },
+      ],
+    }),
+  });
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f12a");
+  const other = loadDemoSpec("f12b");
+  e.createCampaign(spec);
+  e.createCampaign(other);
+  const otherDecide = e.storage.claimDecide(other.campaign_id, "t")!;
+  const foreign = e.storage.recordObservation({
+    campaign_id: other.campaign_id,
+    producer_id: "t",
+    submission_id: "foreign",
+    run_id: otherDecide.run_id,
+    attempt_id: otherDecide.run_id,
+    subject: "x",
+    body: {},
+    artifact_refs: [],
+    conditions: {},
+    env_rev: "env-1",
+  });
+  seedReadyStep(e, spec.campaign_id, "f12 step", "f12-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "resolved");
+
+  evidence = foreign.canonical_ids.observation_id!;
+  seedReadyStep(e, spec.campaign_id, "f12 step2", "f12-fp2");
+  const out2 = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(out2);
+  assert.notEqual(out2.reason, "resolved");
+  e.close();
+});
+
+test("F13 blocked without blocked_on is rejected", async () => {
+  const e = engine(dir(), {
+    chooseExecute: () => ({
+      type: "tool_calls",
+      calls: [{ name: "finish_step", arguments: { disposition: "blocked", summary: "no field" } }],
+    }),
+  });
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f13");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f13 step", "f13-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "blocked");
+  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F14 deferred without reopen or next_action is rejected", async () => {
+  const e = engine(dir(), {
+    chooseExecute: () => ({
+      type: "tool_calls",
+      calls: [{ name: "finish_step", arguments: { disposition: "deferred", summary: "stuck" } }],
+    }),
+  });
+  e.config.max_execute_turns_per_run = 1;
+  const spec = loadDemoSpec("f14");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f14 step", "f14-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "deferred");
+  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F15 provider error does not Finalize or resolve", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "error", message: "upstream 500" }) });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f15");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f15 step", "f15-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "protocol_error");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F16 provider abort does not Finalize; run cancelled", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "aborted", message: "cancel" }) });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f16");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f16 step", "f16-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "cancelled");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  e.close();
+});
+
+test("F17 deadline already past skips Finalize model request", async () => {
+  let e: Engine;
+  const spec = loadDemoSpec("f17");
+  const chooseExecute: TurnChooser = () => {
+    const camp = e.storage.getCampaign(spec.campaign_id);
+    camp.spec.budget.deadline_ms = Date.now() - 1;
+    e.storage.store.db.prepare("UPDATE campaigns SET spec_json = ? WHERE id = ?").run(JSON.stringify(camp.spec), spec.campaign_id);
+    return { type: "text", text: "primary done" };
+  };
+  e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f17 step", "f17-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "resolved");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  assert.equal(e.lastWorker?.modelGateway?.modelSends, 1);
+  e.close();
+});
+
+test("F18 unaffordable Finalize is budget and non-negative buckets", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "stop" }) });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f18");
+  spec.budget.max_calls = 1;
+  spec.budget.max_tokens = null;
+  spec.budget.max_cost_micro = null;
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f18 step", "f18-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "budget");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  const snap = e.budget.snapshot(spec.campaign_id);
+  assert.ok(Number(snap.free_calls) >= 0);
+  assert.ok(Number(snap.reserved_calls) >= 0);
+  assert.ok(Number(snap.liability_calls) >= 0);
+  assert.ok(Number(snap.spent_calls) >= 0);
+  e.close();
+});
+
+test("F19 stale fence finish is rejected", async () => {
+  let e: Engine;
+  const spec = loadDemoSpec("f19");
+  const chooseExecute: TurnChooser = () => {
+    e.storage.store.db.prepare("UPDATE task_runs SET fence = fence + 1 WHERE campaign_id = ? AND mode = 'execute'").run(spec.campaign_id);
+    return {
+      type: "tool_calls",
+      calls: [{ name: "finish_step", arguments: { disposition: "deferred", summary: "stale", next_action: "no" } }],
+    };
+  };
+  e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.config.max_execute_turns_per_run = 1;
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f19 step", "f19-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "resolved");
+  assert.notEqual(e.storage.list("steps", spec.campaign_id)[0]!.status, "resolved");
+  e.close();
+});
+
+test("F20 uncertain external effect is not Finalize-resolved", async () => {
+  let e: Engine;
+  const spec = loadDemoSpec("f20");
+  const chooseExecute: TurnChooser = (ctx) => {
+    const text = userText(ctx.messages[0] as { role?: string; content?: unknown });
+    let runId: string | undefined;
+    try {
+      runId = (JSON.parse(text) as { run_id?: string }).run_id;
+    } catch {
+      runId = undefined;
+    }
+    if (runId) {
+      const inv = e.invocations.prepare({
+        campaign_id: spec.campaign_id,
+        run_id: runId,
+        kind: "tool",
+        purpose: "world_act",
+        fence: 1,
+        cancel_epoch: 0,
+        effect_class: "unknown",
+        reserved_calls: 1,
+      });
+      e.invocations.mark(inv.id, "uncertain");
+    }
+    return { type: "text", text: "stop with uncertain" };
+  };
+  e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f20 step", "f20-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.notEqual(outcome.reason, "resolved");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  e.close();
+});
+
+test("F26 incomplete step is not reclaimed in the same cycle", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "no finish" }) });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f26");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f26 step", "f26-fp");
+  const first = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(first);
+  assert.equal(first.reason, "incomplete_protocol");
+  const stepId = first.step_id!;
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  const second = await e.runExecuteSlot(spec.campaign_id);
+  assert.equal(second, null);
+  const step = e.storage.store.db.prepare("SELECT status FROM steps WHERE id = ?").get(stepId) as { status: string };
+  assert.equal(step.status, "deferred");
+  const runs = e.storage.store.db
+    .prepare("SELECT COUNT(*) AS c FROM task_runs WHERE step_id = ? AND mode = 'execute'")
+    .get(stepId) as { c: number };
+  assert.equal(Number(runs.c), 1);
+  e.close();
+});
+
+test("F27 incomplete keeps observations for a later Decide pack", async () => {
+  const chooseExecute: TurnChooser = (ctx) => {
+    const toolNames = (ctx.tools ?? []).map((t) => t.name);
+    if (toolNames.length === 1 && toolNames[0] === "finish_step") {
+      return { type: "text", text: "finalize miss" };
+    }
+    if (!toolResultNames(ctx.messages).includes("submit_observation")) {
+      return {
+        type: "tool_calls",
+        calls: [{ name: "submit_observation", arguments: { subject: "f27-keep", body: { keep: true } } }],
+      };
+    }
+    return { type: "text", text: "stop" };
+  };
+  const e = engine(dir(), { chooseExecute });
+  e.config.finalization.enabled = true;
+  e.config.max_execute_turns_per_run = 2;
+  const spec = loadDemoSpec("f27");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f27 step", "f27-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  assert.ok(outcome.observation_ids.length >= 1);
+  const obsId = outcome.observation_ids[0]!;
+  const rows = e.storage.list("observations", spec.campaign_id);
+  assert.ok(rows.some((r) => r.id === obsId && r.subject === "f27-keep"));
+  const pack = buildContextPack(e.storage, {
+    run_id: "preview-f27",
+    campaign_id: spec.campaign_id,
+    step_id: outcome.step_id,
+    mode: "decide",
+    kind: "decide",
+    attempt_no: 1,
+    fence: 1,
+    cancel_epoch: 0,
+    deadline_ms: Date.now() + 60_000,
+    lease_owner: "f27",
+    continuation_of: outcome.run_id,
+  });
+  assert.ok(JSON.stringify(pack.user_payload).includes(obsId));
+  e.close();
+});
+
+test("finalization rates match underlying counters", async () => {
+  const e = engine(dir(), { chooseExecute: legalResolvedChooser() });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("rates-primary");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "rates step", "rates-fp");
+  await e.runExecuteSlot(spec.campaign_id);
+  const st = e.status(spec.campaign_id);
+  const fin = st.finalization as {
+    execute_runs_total: number;
+    finish_primary_total: number;
+    primary_finish_rate: number | null;
+    protocol_complete_rate: number | null;
+  };
+  assert.equal(fin.execute_runs_total, 1);
+  assert.equal(fin.finish_primary_total, 1);
+  assert.equal(fin.primary_finish_rate, 1);
+  assert.equal(fin.protocol_complete_rate, 1);
+  e.close();
+});
+
+test("F28 incomplete does not complete coverage finding or step", async () => {
+  const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "nope" }) });
+  e.config.finalization.enabled = true;
+  const spec = loadDemoSpec("f28");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f28 step", "f28-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  const step = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.notEqual(step.status, "resolved");
+  const coverage = e.storage.list("coverage_items", spec.campaign_id);
+  assert.equal(
+    coverage.every((c) => c.execution_state !== "tested"),
+    true,
+  );
+  const findings = e.storage.list("findings", spec.campaign_id);
+  assert.equal(
+    findings.every((f) => f.status !== "confirmed"),
+    true,
+  );
+  e.close();
+});
+

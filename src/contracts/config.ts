@@ -3,6 +3,7 @@ import { validateCampaignSpec } from "../domain/spec.ts";
 import { invalidInput } from "../domain/errors.ts";
 import type { CampaignSpec } from "../domain/types.ts";
 import { PI_COMMIT, PI_DECLARED_VERSION, SCHEMA_VERSION, TYPEBOX_VERSION } from "../version.ts";
+import { DEFAULT_FINALIZATION, type FinalizationConfig } from "./finalization.ts";
 
 export interface RuntimeConfig {
   data_dir: string;
@@ -23,6 +24,7 @@ export interface RuntimeConfig {
   tool_preview_limit: number;
   automatic_model_fallback: false;
   automatic_extension_loading: false;
+  finalization: FinalizationConfig;
 }
 
 export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "artifact_root" | "instance_id"> = {
@@ -40,6 +42,7 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   tool_preview_limit: 50_000,
   automatic_model_fallback: false,
   automatic_extension_loading: false,
+  finalization: { ...DEFAULT_FINALIZATION },
 };
 
 export function makeRuntimeConfig(dataDir: string, instanceId = `proc-${randomUUID()}`): RuntimeConfig {

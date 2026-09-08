@@ -156,6 +156,11 @@ CREATE TABLE IF NOT EXISTS task_runs (
   continuation_of TEXT,
   finish_requested INTEGER NOT NULL DEFAULT 0,
   env_admission INTEGER NOT NULL DEFAULT 1,
+  finish_submission_id TEXT,
+  finish_payload_json TEXT,
+  finish_submitted_at TEXT,
+  primary_stop_trigger TEXT,
+  finalize_attempted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id)

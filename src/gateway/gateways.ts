@@ -58,6 +58,7 @@ export interface ToolInvokeRequest {
   lease: RunLease;
   effect: EffectClass;
   envTool: boolean;
+  controlPlane?: "terminal";
 }
 
 export interface ToolInvokeResult {
@@ -188,12 +189,15 @@ export class ToolGateway {
     if (Number(run.fence) !== this.lease.fence) {
       return { invocation_id: "none", blocked: true, reason: "stale_fence", allowed: false };
     }
-    const deadlineDeny = admissionDeadline(this.storage, this.lease);
-    if (deadlineDeny) {
-      return { invocation_id: "none", blocked: true, reason: deadlineDeny, allowed: false };
+    const terminal = req.controlPlane === "terminal";
+    if (!terminal) {
+      const deadlineDeny = admissionDeadline(this.storage, this.lease);
+      if (deadlineDeny) {
+        return { invocation_id: "none", blocked: true, reason: deadlineDeny, allowed: false };
+      }
     }
     const allow = this.storage.getCampaign(this.lease.campaign_id).spec.tool_allowlist;
-    if (allow.length > 0 && !allow.includes(req.name)) {
+    if (!terminal && allow.length > 0 && !allow.includes(req.name)) {
       return { invocation_id: "none", blocked: true, reason: "tool_not_allowlisted", allowed: false };
     }
     if (req.envTool && !this.storage.envAdmissionOpen(this.lease.run_id)) {
@@ -204,11 +208,18 @@ export class ToolGateway {
     if (pathDenied) {
       return { invocation_id: "none", blocked: true, reason: pathDenied, allowed: false };
     }
-    const used = Number(
-      (this.storage.store.db.prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND kind = 'tool'").get(this.lease.run_id) as { c: number }).c,
-    );
-    if (used >= this.maxToolCalls) {
-      return { invocation_id: "none", blocked: true, reason: "run_tool_cap", allowed: false };
+    if (!terminal) {
+      const used = Number(
+        (this.storage.store.db.prepare("SELECT COUNT(*) AS c FROM invocations WHERE run_id = ? AND kind = 'tool'").get(this.lease.run_id) as { c: number }).c,
+      );
+      if (used >= this.maxToolCalls) {
+        return { invocation_id: "none", blocked: true, reason: "run_tool_cap", allowed: false };
+      }
+    } else {
+      const runState = this.storage.getRun(this.lease.run_id);
+      if (String(runState.state) === "finished" && !runState.finish_payload_json) {
+        return { invocation_id: "none", blocked: true, reason: "run_finished", allowed: false };
+      }
     }
     if (req.envTool) {
       if (!this.dispatchGate) {
@@ -245,6 +256,10 @@ export class ToolGateway {
         const reason = err instanceof DomainError ? err.code : String(err);
         return { invocation_id: "none", blocked: true, reason, allowed: false };
       }
+    }
+    if (terminal) {
+      ingestToolOutputAsData(this.storage, this.lease.campaign_id, this.lease.run_id, JSON.stringify(req.args ?? {}));
+      return { invocation_id: "terminal", blocked: false, allowed: true };
     }
     if (!this.budget.canAdmit(this.lease.campaign_id, 1, 0, 0)) {
       throw new DomainError("budget_exhausted", "tool call exceeds root cap", "budget");

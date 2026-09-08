@@ -201,6 +201,8 @@ export function executeChooser(): TurnChooser {
     let reason: "resolved" | "deferred" | "blocked" = "resolved";
     if (transient) reason = "deferred";
     else if (missing || (plan.blocked && !plan.factWhen(results))) reason = "blocked";
+    const obs = findObservationId(results);
+    if (reason === "resolved" && !obs) reason = "deferred";
     return {
       type: "tool_calls",
       calls: [
@@ -209,7 +211,9 @@ export function executeChooser(): TurnChooser {
           arguments: {
             reason,
             summary: plan.summary,
+            evidence_refs: reason === "resolved" && obs ? [obs] : [],
             blocked_on: reason === "blocked" ? plan.blocked ?? "missing_precondition" : undefined,
+            next_action: reason === "deferred" ? "retry after transient or missing evidence" : undefined,
           },
         },
       ],

@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export function loadPrompt(mode: "decide" | "execute"): string {
-  const name = mode === "decide" ? "decide.txt" : "execute.txt";
+export function loadPrompt(mode: "decide" | "execute" | "finalize"): string {
+  const name = mode === "decide" ? "decide.txt" : mode === "finalize" ? "finalize-execute.txt" : "execute.txt";
   const candidates = [
     join(here, "../../../prompts", name),
     join(process.cwd(), "prompts", name),
@@ -24,9 +24,11 @@ export function loadPrompt(mode: "decide" | "execute"): string {
       // try next
     }
   }
-  return mode === "decide"
-    ? "Propose typed plan operations, then finish_decision. Do not complete the campaign."
-    : "Solve the current step with approved tools, submit observations, then finish_step.";
+  if (mode === "decide") return "Propose typed plan operations, then finish_decision. Do not complete the campaign.";
+  if (mode === "finalize") {
+    return "当前 Execute 片段已经停止，必须立即提交片段结果。你只能调用 finish_step，不能继续探索。";
+  }
+  return "Solve the current step with approved tools, submit observations, then finish_step.";
 }
 
 export function buildContextPack(storage: StorageService, lease: RunLease, extra: Record<string, unknown> = {}): ContextPack {

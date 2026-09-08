@@ -110,6 +110,16 @@ Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx r
 
 备份：`.\rionext.cmd backup --out path\to\dir`。
 
+## Execute 收卷（Finalize）
+
+默认 `finalization.enabled=false`：Execute 没交合法 `finish_step` 就 `incomplete_protocol`，不会自动 `resolved`。
+
+打开后，自然停笔、turn cap、普通 tool cap 会再打一轮只含 `finish_step` 的 Finalize（最多一次）。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果不会走语义成功。
+
+回滚：把 runtime `finalization.enabled` 设回 `false`。不要靠改提示词代替这个开关。
+
+`status` 会打 主动交卷率、补交成功率、最终协议完整率（由 `run.finish_submitted` / `run.finalization_started` 等事件计算）。
+
 ## 预算和租约
 
 默认 1000 次调用、1000 万 tokens。模型发送和工具调用各算 1 次调用。Execute 租约 60 分钟。high thinking 单次流式最多约 600 秒，一个片段里多轮模型+Kali 要能在租约内结束。
