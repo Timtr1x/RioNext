@@ -117,7 +117,19 @@ async function main(): Promise<void> {
     }
     return;
   }
-  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir), flags);
+  let cfg;
+  try {
+    cfg = applyFinalizationFlags(makeRuntimeConfig(dir), flags);
+  } catch (err) {
+    if (err instanceof DomainError) {
+      console.error(`${err.code}: ${err.message}`);
+      process.exitCode = 2;
+    } else {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (flags["lease-ms"]) cfg.lease_ttl_ms = Number(flags["lease-ms"]);
   const engine = new Engine(cfg, {
     maxCycles: flags["max-cycles"] ? Number(flags["max-cycles"]) : 1000,

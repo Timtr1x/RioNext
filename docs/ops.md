@@ -114,17 +114,17 @@ OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役�
 
 ## Execute 收卷（Finalize）
 
-默认 `finalization.enabled=false`：Execute 没交合法 `finish_step` 就 `incomplete_protocol`，不会自动 `resolved`。
+默认 `finalization.enabled=true`：Execute 自然停笔、turn cap、普通 tool cap 且 Primary 没交合法 `finish_step` 时，再打一轮只含 `finish_step` 的 Finalize（最多一次，thinking low，max_output_tokens 512，强制 `tool_choice=finish_step`）。Primary 已经合法交卷则不跑 Finalize。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果 / 预算不足不会走语义成功。
 
-打开：
+`deferred` 带 `next_action` 且没给 `reopen_rule` 时默认 `{kind:"always"}`，下一个调度周期会再派发（同一 Run 内不递归，最多 5 次 Execute）。没有 `next_action` 的 `deferred`、以及没给规则的 `blocked`，默认 `{kind:"never"}`。显式 `reopen_rule` 优先。
+
+关闭：
 
 ```
-.\rionext.cmd run --spec path\to\spec.json --finalization
+.\rionext.cmd run --spec path\to\spec.json --no-finalization
 ```
 
-或环境变量 `RIONEXT_FINALIZATION=1`。打开后，自然停笔、turn cap、普通 tool cap 会再打一轮只含 `finish_step` 的 Finalize（最多一次，thinking low，max_output_tokens 512）。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果不会走语义成功。`deferred`/`blocked` 没给 `reopen_rule` 时默认 `never`，不会马上再派发。
-
-回滚：不要加 `--finalization`，也不要设环境变量。不要靠改提示词代替这个开关。
+或环境变量 `RIONEXT_FINALIZATION=0`。关闭后，没交 `finish_step` 就 `incomplete_protocol`，不会自动 `resolved`。`--finalization` 和 `RIONEXT_FINALIZATION=1` 仍可强制打开。两个 CLI 开关不能一起用。不要靠改提示词代替这个开关。
 
 `status` 会打 主动交卷率、补交成功率、最终协议完整率（由 `run.finish_submitted` / `run.finalization_started` 等事件计算）。
 

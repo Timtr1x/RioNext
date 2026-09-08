@@ -405,7 +405,19 @@ export class PiWorker implements WorkerRuntime {
           reopen_condition: Type.Optional(Type.String()),
           reopen_rule: Type.Optional(
             Type.Object({
-              kind: Type.String(),
+              kind: Type.Union(
+                [
+                  Type.Literal("always"),
+                  Type.Literal("never"),
+                  Type.Literal("fact_key"),
+                  Type.Literal("env_revision"),
+                  Type.Literal("observation_subject"),
+                ],
+                {
+                  description:
+                    "always: a concrete next attempt is ready now; never: no executable follow-up; fact_key: wait for a fact; env_revision: wait for an environment revision; observation_subject: wait for an observation of that subject",
+                },
+              ),
               key: Type.Optional(Type.String()),
               env_revision: Type.Optional(Type.String()),
               subject: Type.Optional(Type.String()),

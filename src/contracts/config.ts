@@ -61,9 +61,23 @@ export function applyFinalizationFlags(
   flags: Record<string, string | boolean> = {},
   env: NodeJS.ProcessEnv = process.env,
 ): RuntimeConfig {
-  if (flags.finalization === true || flags.finalization === "1" || env.RIONEXT_FINALIZATION === "1") {
+  if (flags.finalization && flags["no-finalization"]) {
+    throw invalidInput(
+      "finalization_flag_conflict",
+      "--finalization and --no-finalization cannot be used together",
+    );
+  }
+
+  if (flags["no-finalization"] === true) {
+    runtime.finalization.enabled = false;
+  } else if (flags.finalization === true) {
+    runtime.finalization.enabled = true;
+  } else if (env.RIONEXT_FINALIZATION === "0") {
+    runtime.finalization.enabled = false;
+  } else if (env.RIONEXT_FINALIZATION === "1") {
     runtime.finalization.enabled = true;
   }
+
   return runtime;
 }
 

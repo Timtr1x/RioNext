@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import { parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
+import { HELP, parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
 import { applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "../../src/cli/format.ts";
 
@@ -58,15 +60,50 @@ test("formatList and formatVerify are operator text, not JSON", () => {
   assert.match(rej, /rionext start camp_b/);
 });
 
+test("CLI help documents default-on Finalize and the off switch", () => {
+  assert.match(HELP, /Finalize is on by default/);
+  assert.match(HELP, /--no-finalization/);
+  assert.match(HELP, /RIONEXT_FINALIZATION=0/);
+  assert.match(HELP, /--finalization/);
+  assert.match(HELP, /RIONEXT_FINALIZATION=1/);
+});
+
+test("ops.md documents default-on Finalize and the off switch", () => {
+  const ops = readFileSync(join(process.cwd(), "docs/ops.md"), "utf8");
+  assert.match(ops, /finalization\.enabled=true/);
+  assert.match(ops, /--no-finalization/);
+  assert.match(ops, /RIONEXT_FINALIZATION=0/);
+  assert.match(ops, /--finalization/);
+  assert.match(ops, /RIONEXT_FINALIZATION=1/);
+});
+
 test("parseArgs --finalization and RIONEXT_FINALIZATION enable the switch", () => {
   const parsed = parseArgs(["run", "--spec", "x.json", "--finalization"]);
   assert.equal(parsed.flags.finalization, true);
-  const cfg = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin"), parsed.flags);
+  const cfg = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin"), parsed.flags, {});
   assert.equal(cfg.finalization.enabled, true);
-  const off = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin2"), {});
-  assert.equal(off.finalization.enabled, false);
   const envOn = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin3"), {}, { RIONEXT_FINALIZATION: "1" } as NodeJS.ProcessEnv);
   assert.equal(envOn.finalization.enabled, true);
+});
+
+test("parseArgs --no-finalization and RIONEXT_FINALIZATION=0 disable Finalize", () => {
+  const parsed = parseArgs(["run", "--spec", "x.json", "--no-finalization"]);
+  assert.equal(parsed.flags["no-finalization"], true);
+  const off = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin-off"), parsed.flags, {});
+  assert.equal(off.finalization.enabled, false);
+  const envOff = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin-env0"), {}, { RIONEXT_FINALIZATION: "0" } as NodeJS.ProcessEnv);
+  assert.equal(envOff.finalization.enabled, false);
+});
+
+test("CLI --finalization and --no-finalization together conflict", () => {
+  const parsed = parseArgs(["run", "--spec", "x.json", "--finalization", "--no-finalization"]);
+  assert.equal(parsed.flags.finalization, true);
+  assert.equal(parsed.flags["no-finalization"], true);
+  assert.throws(
+    () => applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin-conflict"), parsed.flags, {}),
+    (err: Error & { code?: string }) =>
+      err.code === "finalization_flag_conflict" && /cannot be used together/.test(err.message),
+  );
 });
 
 test("formatProgress prints budget and recent calls", () => {

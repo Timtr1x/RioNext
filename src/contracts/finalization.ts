@@ -91,7 +91,7 @@ export interface FinalizationConfig {
 }
 
 export const DEFAULT_FINALIZATION: FinalizationConfig = {
-  enabled: false,
+  enabled: true,
   max_attempts: 1,
   max_output_tokens: 512,
   transcript_tail_chars: 4000,
@@ -141,8 +141,11 @@ export function parseFinishInput(raw: unknown): { ok: true; value: FinishStepInp
       reopen_rule = null;
     }
   }
-  if (disposition === "deferred" || disposition === "blocked") {
-    reopen_rule = reopen_rule ?? { kind: "never" };
+  if (disposition === "deferred" && !reopen_rule) {
+    reopen_rule = next_action ? { kind: "always" } : { kind: "never" };
+  }
+  if (disposition === "blocked" && !reopen_rule) {
+    reopen_rule = { kind: "never" };
   }
   return {
     ok: true,

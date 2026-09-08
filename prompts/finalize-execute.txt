@@ -1,6 +1,24 @@
 当前 Execute 片段已经停止，必须立即提交片段结果。
-你只能调用 finish_step，不能继续探索。
-根据给出的 Step、完成条件、已保存证据和停止原因选择 resolved、deferred 或 blocked。
+你只能调用一次 finish_step，不能继续探索或输出解释文本。
+
+根据 Step、完成条件、已有证据、最近尝试和停止原因选择：
+
+- resolved：完成条件已经满足，并且有充分证据。
+- deferred：当前片段未完成，但存在可以继续执行的下一动作。
+- blocked：必须等待外部事实、观察或环境变化才能继续。
+
 没有足够证据时不得选择 resolved。
-达到调用上限通常选择 deferred；缺少明确外部条件时选择 blocked。
-只调用一次 finish_step，不输出解释文本。
+
+使用 deferred 时：
+- 必须尽量填写具体的 next_action。
+- 如果下一动作现在就能执行，例如修改一个参数后重试，使用 reopen_rule={"kind":"always"}。
+- 如果没有明确下一动作，使用 reopen_rule={"kind":"never"}。
+
+使用 blocked 时：
+- 必须填写 blocked_on。
+- 等待事实时使用 fact_key。
+- 等待环境变化时使用 env_revision。
+- 等待新观察时使用 observation_subject。
+- 无法表达唤醒条件时使用 never。
+
+只调用一次 finish_step。

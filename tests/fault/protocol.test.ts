@@ -8,6 +8,7 @@ import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { Engine } from "../../src/controller/engine.ts";
+import { MAX_STEP_ATTEMPTS } from "../../src/storage/service.ts";
 import { buildContextPack } from "../../src/context/builder.ts";
 import { evaluateCompletion } from "../../src/domain/completion.ts";
 import type { RunLease } from "../../src/domain/types.ts";
@@ -520,7 +521,6 @@ test("T17 run stop on turn cap keeps observations", async () => {
   };
   const e = engine(dir(), { chooseDecide: oneStepDecide("t17 cap step"), chooseExecute });
   e.config.max_execute_turns_per_run = 1;
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("t17");
   e.createCampaign(spec);
   await e.runDecide(spec.campaign_id);
@@ -737,7 +737,6 @@ function legalResolvedChooser(): TurnChooser {
 
 test("F01 primary legal finish does not start Finalize", async () => {
   const e = engine(dir(), { chooseExecute: legalResolvedChooser() });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f01");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f01 step", "f01-fp");
@@ -773,7 +772,7 @@ test("F02 natural stop Finalize resolved", async () => {
     return { type: "text", text: "stopping without finish" };
   };
   e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
+  assert.equal(e.config.finalization.enabled, true);
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f02 step", "f02-fp");
   const outcome = await e.runExecuteSlot(spec.campaign_id);
@@ -801,7 +800,6 @@ test("F03 Finalize deferred with next_action", async () => {
     return { type: "text", text: "hit cap soon" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.config.max_execute_turns_per_run = 1;
   const spec = loadDemoSpec("f03");
   e.createCampaign(spec);
@@ -809,7 +807,9 @@ test("F03 Finalize deferred with next_action", async () => {
   const outcome = await e.runExecuteSlot(spec.campaign_id);
   assert.ok(outcome);
   assert.equal(outcome.reason, "deferred");
-  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "deferred");
+  const step = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.equal(step.status, "deferred");
+  assert.deepEqual(JSON.parse(String(step.reopen_rule_json)), { kind: "always" });
   e.close();
 });
 
@@ -830,7 +830,6 @@ test("F04 Finalize blocked with blocked_on", async () => {
     return { type: "text", text: "cannot proceed" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f04");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f04 step", "f04-fp");
@@ -859,7 +858,6 @@ test("F05 tool cap still admits Finalize finish_step", async () => {
     return { type: "tool_calls", calls: [{ name: "world_inspect", arguments: { target: "desk" } }] };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.config.max_tool_calls_per_run = 1;
   const spec = loadDemoSpec("f05");
   e.createCampaign(spec);
@@ -888,7 +886,6 @@ test("F06 turn cap leaves a separate Finalize model call", async () => {
     return { type: "text", text: "turn 1" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.config.max_execute_turns_per_run = 1;
   const spec = loadDemoSpec("f06");
   e.createCampaign(spec);
@@ -913,7 +910,6 @@ test("F07 Finalize rejects env tools", async () => {
     return { type: "text", text: "natural" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f07");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f07 step", "f07-fp");
@@ -934,7 +930,6 @@ test("F08 Finalize text only is incomplete with no third model turn", async () =
     return { type: "text", text: "primary stop" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f08");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f08 step", "f08-fp");
@@ -965,7 +960,6 @@ test("F09 duplicate finish is idempotent; different payload conflicts", async ()
     ],
   });
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f09");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f09 step", "f09-fp");
@@ -1102,7 +1096,6 @@ test("F14 deferred without reopen_rule parks and is not reclaimed", async () => 
 
 test("F15 provider error does not Finalize or resolve", async () => {
   const e = engine(dir(), { chooseExecute: () => ({ type: "error", message: "upstream 500" }) });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f15");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f15 step", "f15-fp");
@@ -1116,7 +1109,6 @@ test("F15 provider error does not Finalize or resolve", async () => {
 
 test("F16 provider abort does not Finalize; run cancelled", async () => {
   const e = engine(dir(), { chooseExecute: () => ({ type: "aborted", message: "cancel" }) });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f16");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f16 step", "f16-fp");
@@ -1137,7 +1129,6 @@ test("F17 deadline already past skips Finalize model request", async () => {
     return { type: "text", text: "primary done" };
   };
   e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f17 step", "f17-fp");
   const outcome = await e.runExecuteSlot(spec.campaign_id);
@@ -1150,7 +1141,6 @@ test("F17 deadline already past skips Finalize model request", async () => {
 
 test("F18 unaffordable Finalize is budget and non-negative buckets", async () => {
   const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "stop" }) });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f18");
   spec.budget.max_calls = 1;
   spec.budget.max_tokens = null;
@@ -1180,7 +1170,6 @@ test("F19 stale fence finish is rejected", async () => {
     };
   };
   e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.config.max_execute_turns_per_run = 1;
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f19 step", "f19-fp");
@@ -1218,7 +1207,6 @@ test("F20 uncertain external effect is not Finalize-resolved", async () => {
     return { type: "text", text: "stop with uncertain" };
   };
   e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f20 step", "f20-fp");
   const outcome = await e.runExecuteSlot(spec.campaign_id);
@@ -1230,7 +1218,6 @@ test("F20 uncertain external effect is not Finalize-resolved", async () => {
 
 test("F26 incomplete step is not reclaimed in the same cycle", async () => {
   const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "no finish" }) });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f26");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f26 step", "f26-fp");
@@ -1265,7 +1252,6 @@ test("F27 incomplete keeps observations for a later Decide pack", async () => {
     return { type: "text", text: "stop" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   e.config.max_execute_turns_per_run = 2;
   const spec = loadDemoSpec("f27");
   e.createCampaign(spec);
@@ -1296,7 +1282,6 @@ test("F27 incomplete keeps observations for a later Decide pack", async () => {
 
 test("finalization rates match underlying counters", async () => {
   const e = engine(dir(), { chooseExecute: legalResolvedChooser() });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("rates-primary");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "rates step", "rates-fp");
@@ -1317,7 +1302,6 @@ test("finalization rates match underlying counters", async () => {
 
 test("F28 incomplete does not complete coverage finding or step", async () => {
   const e = engine(dir(), { chooseExecute: () => ({ type: "text", text: "nope" }) });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f28");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f28 step", "f28-fp");
@@ -1361,7 +1345,6 @@ test("F29 Finalizer deferred reopen_rule=never is not reclaimed", async () => {
     return { type: "text", text: "stop" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f29");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f29 step", "f29-fp");
@@ -1401,7 +1384,6 @@ test("F30 blocked reopen_rule=fact_key waits for the fact", async () => {
     return { type: "text", text: "stop" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f30");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f30 step", "f30-fp");
@@ -1512,7 +1494,6 @@ test("F32 F33 F34 Finalizer reserves 512 tokens, thinking low, forced tool", asy
     return { type: "text", text: "natural" };
   };
   const e = engine(dir(), { chooseExecute });
-  e.config.finalization.enabled = true;
   const spec = loadDemoSpec("f32");
   e.createCampaign(spec);
   seedReadyStep(e, spec.campaign_id, "f32 step", "f32-fp");
@@ -1530,7 +1511,7 @@ test("F32 F33 F34 Finalizer reserves 512 tokens, thinking low, forced tool", asy
 
 test("F35 CLI --finalization and env actually start Finalize", async () => {
   const chooseExecute: TurnChooser = () => ({ type: "text", text: "no finish" });
-  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir()), { finalization: true });
+  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir()), { finalization: true }, {});
   assert.equal(cfg.finalization.enabled, true);
   const e = new Engine(cfg, { silent: true, maxCycles: 2, chooseExecute });
   const spec = loadDemoSpec("f35");
@@ -1539,6 +1520,124 @@ test("F35 CLI --finalization and env actually start Finalize", async () => {
   await e.runExecuteSlot(spec.campaign_id);
   const started = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finalization_started");
   assert.equal(started.length, 1);
+  e.close();
+});
+
+test("F36 --no-finalization natural stop stays incomplete_protocol", async () => {
+  const chooseExecute: TurnChooser = () => ({ type: "text", text: "no finish" });
+  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir()), { "no-finalization": true }, {});
+  assert.equal(cfg.finalization.enabled, false);
+  const e = new Engine(cfg, { silent: true, maxCycles: 2, chooseExecute });
+  const spec = loadDemoSpec("f36");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f36 step", "f36-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  assert.equal(e.lastWorker?.finalizerModelSends ?? 0, 0);
+  const started = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finalization_started");
+  assert.equal(started.length, 0);
+  e.close();
+});
+
+test("F37 RIONEXT_FINALIZATION=0 skips Finalize", async () => {
+  const chooseExecute: TurnChooser = () => ({ type: "text", text: "no finish" });
+  const cfg = applyFinalizationFlags(makeRuntimeConfig(dir()), {}, { RIONEXT_FINALIZATION: "0" } as NodeJS.ProcessEnv);
+  assert.equal(cfg.finalization.enabled, false);
+  const e = new Engine(cfg, { silent: true, maxCycles: 2, chooseExecute });
+  const spec = loadDemoSpec("f37");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "f37 step", "f37-fp");
+  const outcome = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(outcome);
+  assert.equal(outcome.reason, "incomplete_protocol");
+  const started = e.storage.list("events", spec.campaign_id).filter((x) => x.type === "run.finalization_started");
+  assert.equal(started.length, 0);
+  e.close();
+});
+
+test("deferred with next_action and no reopen_rule redispatches next cycle", async () => {
+  let seenNextAction: string | null = null;
+  let seenCheckpointNext: string | null = null;
+  const chooseExecute: TurnChooser = (ctx) => {
+    const raw = userText(ctx.messages[0] as { role?: string; content?: unknown });
+    try {
+      const payload = JSON.parse(raw) as {
+        checkpoint?: { next?: string | null };
+        current_step?: { next_action?: string | null };
+      };
+      if (typeof payload.current_step?.next_action === "string" && payload.current_step.next_action.length > 0) {
+        seenNextAction = payload.current_step.next_action;
+      }
+      if (typeof payload.checkpoint?.next === "string" && payload.checkpoint.next.length > 0) {
+        seenCheckpointNext = payload.checkpoint.next;
+      }
+    } catch {
+      // primary prompt is JSON; ignore parse failures
+    }
+    return {
+      type: "tool_calls",
+      calls: [
+        {
+          name: "finish_step",
+          arguments: { disposition: "deferred", summary: "33 failed", next_action: "try 34" },
+        },
+      ],
+    };
+  };
+  const e = engine(dir(), { chooseExecute });
+  const spec = loadDemoSpec("deferred-always");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "pad step", "pad-fp");
+  const first = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(first);
+  assert.equal(first.reason, "deferred");
+  const afterFirst = e.storage.list("steps", spec.campaign_id)[0]!;
+  assert.deepEqual(JSON.parse(String(afterFirst.reopen_rule_json)), { kind: "always" });
+  assert.equal(afterFirst.next_action, "try 34");
+  assert.equal(afterFirst.status, "deferred");
+  e.storage.recomputeStepReadiness(spec.campaign_id);
+  assert.equal(e.storage.list("steps", spec.campaign_id)[0]!.status, "ready");
+  const second = await e.runExecuteSlot(spec.campaign_id);
+  assert.ok(second);
+  const executeRuns = e.storage.list("task_runs", spec.campaign_id).filter((r) => r.mode === "execute");
+  assert.equal(executeRuns.length, 2);
+  const attempts = executeRuns.map((r) => Number(r.attempt_no)).sort((a, b) => a - b);
+  assert.deepEqual(attempts, [1, 2]);
+  assert.equal(seenNextAction, "try 34");
+  assert.equal(seenCheckpointNext, "try 34");
+  e.close();
+});
+
+test("repeating deferred + next_action stops at MAX_STEP_ATTEMPTS", async () => {
+  const e = engine(dir(), {
+    chooseExecute: () => ({
+      type: "tool_calls",
+      calls: [
+        {
+          name: "finish_step",
+          arguments: {
+            disposition: "deferred",
+            summary: "try next value",
+            next_action: "change parameter",
+          },
+        },
+      ],
+    }),
+  });
+  const spec = loadDemoSpec("attempt-cap");
+  e.createCampaign(spec);
+  seedReadyStep(e, spec.campaign_id, "cap step", "cap-fp");
+  const outcomes = [];
+  for (let i = 0; i < MAX_STEP_ATTEMPTS + 3; i++) {
+    const outcome = await e.runExecuteSlot(spec.campaign_id);
+    if (!outcome) break;
+    outcomes.push(outcome);
+  }
+  assert.equal(outcomes.length, MAX_STEP_ATTEMPTS);
+  const executeRuns = e.storage.list("task_runs", spec.campaign_id).filter((r) => r.mode === "execute");
+  assert.equal(executeRuns.length, MAX_STEP_ATTEMPTS);
+  assert.equal(await e.runExecuteSlot(spec.campaign_id), null);
   e.close();
 });
 
