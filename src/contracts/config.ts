@@ -31,9 +31,9 @@ export const DEFAULT_RUNTIME: Omit<RuntimeConfig, "data_dir" | "db_path" | "arti
   max_concurrent_decide_per_campaign: 1,
   max_concurrent_execute: 1,
   pi_tool_execution: "sequential",
-  max_decide_turns: 6,
-  max_execute_turns_per_run: 12,
-  max_tool_calls_per_run: 24,
+  max_decide_turns: 18,
+  max_execute_turns_per_run: 72,
+  max_tool_calls_per_run: 144,
   max_transient_retries_per_invocation: 2,
   max_new_steps_per_decision: 8,
   max_active_frontier_items: 64,
@@ -79,6 +79,30 @@ export function applyFinalizationFlags(
   }
 
   return runtime;
+}
+
+export function applyExecuteLimitFlags(
+  runtime: RuntimeConfig,
+  flags: Record<string, string | boolean> = {},
+): RuntimeConfig {
+  const turns = parsePositiveIntFlag(flags, "max-execute-turns");
+  if (turns != null) runtime.max_execute_turns_per_run = turns;
+  const tools = parsePositiveIntFlag(flags, "max-tool-calls");
+  if (tools != null) runtime.max_tool_calls_per_run = tools;
+  return runtime;
+}
+
+function parsePositiveIntFlag(flags: Record<string, string | boolean>, key: string): number | null {
+  if (!(key in flags)) return null;
+  const raw = flags[key];
+  if (typeof raw !== "string" && typeof raw !== "number") {
+    throw invalidInput(key.replaceAll("-", "_"), `--${key} must be an integer >= 1`);
+  }
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw invalidInput(key.replaceAll("-", "_"), `--${key} must be an integer >= 1`);
+  }
+  return n;
 }
 
 export function validateStartupInput(spec: unknown, runtime: RuntimeConfig): CampaignSpec {

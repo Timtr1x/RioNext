@@ -34,16 +34,20 @@ Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx r
 
 ## 接入模型
 
-密钥进本地 catalog，不进 git。
+密钥进 `.rionext/provider-secrets.json`，不进 git，CLI 也不会打印。网页 `provider ui` 是可选的本地页，和 CLI 同一套 catalog。
 
 ```
 .\rionext.cmd provider add --name "OpenCode Go" --protocol OPENAI_CHAT_COMPLETIONS --base-url https://opencode.ai/zen/go/v1/chat/completions --api-key <KEY>
 .\rionext.cmd provider model add --provider prv_... --name deepseek-v4-flash --context 1000000 --max-output 51200
 .\rionext.cmd provider test --provider prv_... --model deepseek-v4-flash
 .\rionext.cmd provider slots --solver mdl_...
+.\rionext.cmd provider key --provider prv_... --api-key <NEW_KEY>
+.\rionext.cmd provider show prv_...
+.\rionext.cmd provider list
+.\rionext.cmd provider help
 ```
 
-`provider test` 测 auth / text / tools。`slots --solver` 指定主求解模型。空槽会回落到 solver。Web UI：`.\rionext.cmd provider ui --port 7780`。
+换 key 用 `provider key`，不用再 add 一家。`provider set --provider prv_... --api-key ...` 也能改名、协议、地址。`provider rm` 删供应商、模型和 key。`slots --solver` 指定主求解。空槽回落到 solver。`.\rionext.cmd provider ui --port 7780` 仍可用，不是另一套系统。
 
 OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役用 campaign_id，探测用 provider id）和 `User-Agent: rionext/0.1.0`。其他供应商不加这个头。
 
@@ -58,20 +62,31 @@ OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役�
 - `campaign_id`，`schema_version: 1`
 - `mode`: `goal_seeking` 或 `assessment`
 - `root_goal.statement` 和 `success_predicate_ref`（找 flag 用 `flag_recovered`）
-- `budget`：至少 `max_calls` / `max_tokens` / `max_cost_micro` 之一。省略键时默认 1000 calls、10_000_000 tokens
+- `budget`：至少 `max_calls` / `max_tokens` / `max_cost_micro` 之一。省略键时默认 3000 calls、30_000_000 tokens
 - `model_policy`、`scope.assets`、`tool_allowlist`
 
 实靶资产必须能过出口白名单。主机名和 `http://host/` 都写上。容器 iptables 按解析出的 IP 放行。
 
 ## 开跑
 
+实靶找 flag，一条命令就行，不用先写 spec。模型用 catalog 里的 solver 槽：
+
+```
+.\rionext.cmd run --url http://cd60aefe0490ac8ad594d643.http-ctf2.dasctf.com/
+.\rionext.cmd http://cd60aefe0490ac8ad594d643.http-ctf2.dasctf.com/
+```
+
+会生成 Kali `goal_seeking` 战役：入口 URL 进 scope，成功条件 `flag_recovered`，thinking `max`。同一 URL 再跑会接着已有 id。`--id` 可改战役名。`--url` 和 `--spec` 不能一起用。没有可用模型时先 `provider slots --solver mdl_...`。
+
+仍可用文件：
+
 ```
 .\rionext.cmd run --spec path\to\spec.json --progress-ms 60000
 ```
 
-已存在同 id 就接着跑。`--progress-ms` 默认 5 分钟打一次预算和最近调用，`0` 关掉，`--json` 不打进度。`--max-cycles` 默认 1000（控制器循环，不是模型调用）。
+已存在同 id 就接着跑。`--progress-ms` 默认 5 分钟打一次预算和最近调用，`0` 关掉，`--json` 不打进度。`--max-cycles` 默认 1000（控制器循环，不是模型调用）。单个 Execute 片段默认 72 轮模型、144 次工具；`--max-execute-turns` / `--max-tool-calls` 可改。到上限还没 `finish_step` 才进 Finalize。
 
-只创建不跑：`.\rionext.cmd create --spec ...`。恢复：`.\rionext.cmd start <id>`。
+只创建不跑：`.\rionext.cmd create --url ...` 或 `--spec ...`。恢复：`.\rionext.cmd start <id>`。
 
 同一 `campaign_id` 不要再开一个 `start`/`run`。控制器锁会拒绝，硬开第二个进程会抢库。
 
@@ -114,7 +129,7 @@ OpenCode Go（`opencode.ai`）请求会自动带 `x-opencode-session`（战役�
 
 ## Execute 收卷（Finalize）
 
-默认 `finalization.enabled=true`：Execute 自然停笔、turn cap、普通 tool cap 且 Primary 没交合法 `finish_step` 时，再打一轮只含 `finish_step` 的 Finalize（最多一次，thinking low，max_output_tokens 512，强制 `tool_choice=finish_step`）。Primary 已经合法交卷则不跑 Finalize。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果 / 预算不足不会走语义成功。
+默认 `finalization.enabled=true`：Execute 自然停笔、turn cap、普通 tool cap 且 Primary 没交合法 `finish_step` 时，再打一轮只含 `finish_step` 的 Finalize（最多一次，thinking low，max_output_tokens 12800，强制 `tool_choice=finish_step`）。Primary 已经合法交卷则不跑 Finalize。`error` / 取消 / 过期 deadline / stale fence / 未知外部效果 / 预算不足不会走语义成功。
 
 `deferred` 带 `next_action` 且没给 `reopen_rule` 时默认 `{kind:"always"}`，下一个调度周期会再派发（同一 Run 内不递归，最多 5 次 Execute）。没有 `next_action` 的 `deferred`、以及没给规则的 `blocked`，默认 `{kind:"never"}`。显式 `reopen_rule` 优先。
 

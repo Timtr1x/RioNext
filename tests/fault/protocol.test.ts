@@ -1477,7 +1477,7 @@ test("F31 expired run A cannot finishRun over run B", async () => {
   e.close();
 });
 
-test("F32 F33 F34 Finalizer reserves 512 tokens, thinking low, forced tool", async () => {
+test("F32 F33 F34 Finalizer reserves 12800 tokens, thinking low, forced tool", async () => {
   const chooseExecute: TurnChooser = (ctx) => {
     const toolNames = (ctx.tools ?? []).map((t) => t.name);
     if (toolNames.length === 1 && toolNames[0] === "finish_step") {
@@ -1502,8 +1502,8 @@ test("F32 F33 F34 Finalizer reserves 512 tokens, thinking low, forced tool", asy
   const call = e.lastWorker?.modelGateway?.lastCall;
   assert.ok(call);
   assert.equal(call.purpose, "execute_finalize");
-  assert.equal(call.reserved_tokens, 512);
-  assert.equal(call.max_tokens, 512);
+  assert.equal(call.reserved_tokens, 12800);
+  assert.equal(call.max_tokens, 12800);
   assert.equal(call.thinking_level, "low");
   assert.equal(call.force_tool, "finish_step");
   e.close();

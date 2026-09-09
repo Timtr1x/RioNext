@@ -123,7 +123,7 @@ export function createCataloguedProviderStream(opts: CataloguedStreamOpts): {
         user: userText(context),
         messages: contextMessages(context),
         tools,
-        max_tokens: finalize ? Math.max(1, options?.maxTokens ?? 512) : campaignMaxTokens(opts, options?.maxTokens),
+        max_tokens: finalize ? Math.max(1, options?.maxTokens ?? 12800) : campaignMaxTokens(opts, options?.maxTokens),
         thinking: finalize ? "off" : "on",
         thinking_level,
         force_tool: finalize ? "finish_step" : undefined,

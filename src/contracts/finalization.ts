@@ -93,7 +93,7 @@ export interface FinalizationConfig {
 export const DEFAULT_FINALIZATION: FinalizationConfig = {
   enabled: true,
   max_attempts: 1,
-  max_output_tokens: 512,
+  max_output_tokens: 12800,
   transcript_tail_chars: 4000,
   tool_result_tail_count: 8,
 };

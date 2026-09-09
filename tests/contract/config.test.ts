@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyFinalizationFlags, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../../src/contracts/config.ts";
+import { applyExecuteLimitFlags, applyFinalizationFlags, makeRuntimeConfig, printStartupBanner, validateStartupInput } from "../../src/contracts/config.ts";
 import { DomainError } from "../../src/domain/errors.ts";
 import { loadDemoSpec } from "../../src/eval/helpers.ts";
 
@@ -16,6 +16,26 @@ test("startup rejects unknown state-like invalid spec before any run", () => {
 test("worker lease default covers a long high-thinking execute", () => {
   const runtime = makeRuntimeConfig(":memory-data:");
   assert.equal(runtime.lease_ttl_ms, 60 * 60_000);
+});
+
+test("execute fragment defaults to 72 model turns and 144 tool calls", () => {
+  const runtime = makeRuntimeConfig(":memory-data:");
+  assert.equal(runtime.max_execute_turns_per_run, 72);
+  assert.equal(runtime.max_tool_calls_per_run, 144);
+  assert.equal(runtime.max_decide_turns, 18);
+});
+
+test("applyExecuteLimitFlags sets turn and tool caps from CLI", () => {
+  const runtime = applyExecuteLimitFlags(makeRuntimeConfig(":memory-data:"), {
+    "max-execute-turns": "36",
+    "max-tool-calls": "72",
+  });
+  assert.equal(runtime.max_execute_turns_per_run, 36);
+  assert.equal(runtime.max_tool_calls_per_run, 72);
+  assert.throws(
+    () => applyExecuteLimitFlags(makeRuntimeConfig(":memory-data:"), { "max-execute-turns": true }),
+    DomainError,
+  );
 });
 
 test("finalization is enabled by default", () => {

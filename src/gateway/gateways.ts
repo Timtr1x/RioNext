@@ -95,7 +95,7 @@ export class ModelGateway {
     private readonly reserveTokens = 16,
     extra: { finalizeMaxTokens?: number } = {},
   ) {
-    this.finalizeMaxTokens = Math.max(1, extra.finalizeMaxTokens ?? 512);
+    this.finalizeMaxTokens = Math.max(1, extra.finalizeMaxTokens ?? 12800);
   }
 
   closeAdmission(): void {

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { HELP, parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
-import { applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
+import { applyExecuteLimitFlags, applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "../../src/cli/format.ts";
 
 test("parseArgs treats accept/reject as commands and keeps positional id", () => {
@@ -66,6 +66,10 @@ test("CLI help documents default-on Finalize and the off switch", () => {
   assert.match(HELP, /RIONEXT_FINALIZATION=0/);
   assert.match(HELP, /--finalization/);
   assert.match(HELP, /RIONEXT_FINALIZATION=1/);
+  assert.match(HELP, /run --url/);
+  assert.match(HELP, /provider list\|show\|add\|set\|key\|rm/);
+  assert.match(HELP, /72 model turns/);
+  assert.match(HELP, /30_000_000 tokens/);
 });
 
 test("ops.md documents default-on Finalize and the off switch", () => {
@@ -93,6 +97,24 @@ test("parseArgs --no-finalization and RIONEXT_FINALIZATION=0 disable Finalize", 
   assert.equal(off.finalization.enabled, false);
   const envOff = applyFinalizationFlags(makeRuntimeConfig("C:/tmp/rionext-fin-env0"), {}, { RIONEXT_FINALIZATION: "0" } as NodeJS.ProcessEnv);
   assert.equal(envOff.finalization.enabled, false);
+});
+
+test("parseArgs treats a bare URL as run --url", () => {
+  const a = parseArgs(["http://cd60aefe0490ac8ad594d643.http-ctf2.dasctf.com/"]);
+  assert.equal(a.cmd, "run");
+  assert.equal(a.flags.url, "http://cd60aefe0490ac8ad594d643.http-ctf2.dasctf.com/");
+  const b = parseArgs(["run", "--url", "https://lab.example/"]);
+  assert.equal(b.cmd, "run");
+  assert.equal(b.flags.url, "https://lab.example/");
+});
+
+test("parseArgs --max-execute-turns and --max-tool-calls", () => {
+  const parsed = parseArgs(["run", "--spec", "x.json", "--max-execute-turns", "36", "--max-tool-calls", "72"]);
+  assert.equal(parsed.flags["max-execute-turns"], "36");
+  assert.equal(parsed.flags["max-tool-calls"], "72");
+  const cfg = applyExecuteLimitFlags(makeRuntimeConfig("C:/tmp/rionext-turns"), parsed.flags);
+  assert.equal(cfg.max_execute_turns_per_run, 36);
+  assert.equal(cfg.max_tool_calls_per_run, 72);
 });
 
 test("CLI --finalization and --no-finalization together conflict", () => {

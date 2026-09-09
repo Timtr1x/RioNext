@@ -6,7 +6,7 @@ export interface CampaignSummary {
 }
 
 export function formatList(rows: CampaignSummary[]): string {
-  if (!rows.length) return "no campaigns in this data dir. rionext run --spec <file>";
+  if (!rows.length) return "no campaigns in this data dir. rionext run --url <target>";
   const width = Math.max(...rows.map((r) => r.id.length), 8);
   return rows
     .map((r) => {

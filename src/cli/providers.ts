@@ -10,36 +10,107 @@ export function catalogFor(dataDir: string): ProviderCatalog {
   return new ProviderCatalog(dataDir);
 }
 
+export const PROVIDER_HELP = `rionext provider
+
+  list                         providers, models, slots (never prints keys)
+  show <prv|name>              one provider: id, protocol, url, api_key_set, models
+  add --name ... --protocol ... --base-url ... --api-key ...
+  set --provider <prv|name> [--name ...] [--protocol ...] [--base-url ...] [--api-key ...]
+  key --provider <prv|name> --api-key <KEY>
+                               replace the key for an existing provider
+  key --provider <prv|name> --clear
+  rm --provider <prv|name>     delete provider, its models, and its key
+  model list [--provider <prv>]
+  model add --provider <prv> --name <model> [--context N] [--max-output N] [--vision]
+  model rm --model <mdl|name>
+  test --provider <prv> --model <mdl|name>
+  slots [--solver mdl_...] [--visual mdl_...] [--reflect none]
+  ui [--port 7780]             optional local page; CLI covers the same actions
+
+Keys stay in .rionext/provider-secrets.json. Commands never print the secret.
+Protocols: OPENAI_CHAT_COMPLETIONS | OPENAI_RESPONSES | ANTHROPIC_MESSAGES
+`;
+
 export async function handleProviderCommand(
   rest: string[],
   flags: Record<string, string | boolean>,
   dataDir: string,
 ): Promise<unknown> {
   const cat = catalogFor(dataDir);
-  const sub = rest[0] ?? "list";
+  const bare = rest.filter((a) => !a.startsWith("-"));
+  const sub = bare[0] ?? "list";
+  if (sub === "help" || flags.help) return { help: PROVIDER_HELP };
   if (sub === "add") {
-    return cat.addProvider({
+    return publicProvider(cat, cat.addProvider({
       display_name: str(flags.name) || str(flags["display-name"]) || "provider",
       protocol: str(flags.protocol),
       base_url: str(flags["base-url"]) || str(flags.url),
       api_key: str(flags["api-key"]) || str(flags.key),
-    });
+    }));
   }
   if (sub === "list") return cat.publicSnapshot();
-  if (sub === "model") {
-    const action = rest[1] ?? "add";
-    if (action !== "add") throw new Error("provider model add ...");
-    return cat.addModel({
-      provider_id: str(flags.provider),
-      name: str(flags.name),
-      context_window: flags.context ? Number(flags.context) : undefined,
-      max_output_tokens: flags["max-output"] ? Number(flags["max-output"]) : undefined,
-      vision: flags.vision === undefined ? undefined : Boolean(flags.vision),
+  if (sub === "show") {
+    const p = cat.getProvider(str(flags.provider) || bare[1] || "");
+    return {
+      ...publicProvider(cat, p),
+      models: cat.listModels(p.id).map((m) => ({ id: m.id, name: m.name, available: m.available, vision: m.vision })),
+    };
+  }
+  if (sub === "set") {
+    const id = str(flags.provider) || bare[1] || "";
+    const rec = cat.updateProvider({
+      provider_id: id,
+      display_name: str(flags.name) || str(flags["display-name"]) || undefined,
+      protocol: str(flags.protocol) || undefined,
+      base_url: str(flags["base-url"]) || str(flags.url) || undefined,
     });
+    const key = str(flags["api-key"]) || str(flags.key);
+    if (key) cat.setApiKey(rec.id, key);
+    return publicProvider(cat, rec);
+  }
+  if (sub === "key") {
+    const id = str(flags.provider) || bare[1] || "";
+    if (flags.clear === true) return cat.clearApiKey(id);
+    return cat.setApiKey(id, str(flags["api-key"]) || str(flags.key));
+  }
+  if (sub === "rm" || sub === "remove" || sub === "delete") {
+    return cat.removeProvider(str(flags.provider) || bare[1] || "");
+  }
+  if (sub === "model") {
+    const action = bare[1] ?? "list";
+    if (action === "list" || action === "ls") {
+      const provider = str(flags.provider) || bare[2];
+      const models = provider ? cat.listModels(cat.getProvider(provider).id) : cat.listModels();
+      return {
+        models: models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          provider_id: m.provider_id,
+          available: m.available,
+          vision: m.vision,
+          context_window: m.context_window,
+          max_output_tokens: m.max_output_tokens,
+        })),
+      };
+    }
+    if (action === "add") {
+      return cat.addModel({
+        provider_id: str(flags.provider),
+        name: str(flags.name),
+        context_window: flags.context ? Number(flags.context) : undefined,
+        max_output_tokens: flags["max-output"] ? Number(flags["max-output"]) : undefined,
+        vision: flags.vision === undefined ? undefined : Boolean(flags.vision),
+      });
+    }
+    if (action === "rm" || action === "remove" || action === "delete") {
+      return cat.removeModel(str(flags.model) || bare[2] || "");
+    }
+    throw new Error("provider model list|add|rm");
   }
   if (sub === "test") {
     const provider = cat.getProvider(str(flags.provider));
-    const model = cat.listModels(provider.id).find((m) => m.id === flags.model || m.name === flags.model) ?? cat.getModel(str(flags.model));
+    const model =
+      cat.listModels(provider.id).find((m) => m.id === flags.model || m.name === flags.model) ?? cat.getModel(str(flags.model));
     const key = cat.apiKey(provider.id);
     if (!key) throw new Error("missing api key");
     const report = await testConnection({ provider, model, apiKey: key });
@@ -91,7 +162,18 @@ export async function handleProviderCommand(
     await serveProviderUi(dataDir, port);
     return { ui: `http://127.0.0.1:${port}` };
   }
-  throw new Error(`unknown provider command ${sub}`);
+  throw new Error(`unknown provider command ${sub}\n${PROVIDER_HELP}`);
+}
+
+function publicProvider(cat: ProviderCatalog, p: { id: string; display_name: string; protocol: string; base_url: string; created_at: string }) {
+  return {
+    id: p.id,
+    display_name: p.display_name,
+    protocol: p.protocol,
+    base_url: p.base_url,
+    created_at: p.created_at,
+    api_key_set: cat.hasApiKey(p.id),
+  };
 }
 
 function str(v: string | boolean | undefined): string {

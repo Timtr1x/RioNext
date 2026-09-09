@@ -101,19 +101,102 @@ export class ProviderCatalog {
   }
 
   getProvider(id: string): ProviderRecord {
-    const p = this.load().providers.find((x) => x.id === id);
+    const p = this.findProvider(id);
     if (!p) throw new Error(`provider not found: ${id}`);
     return p;
   }
 
+  findProvider(ref: string): ProviderRecord | undefined {
+    const cat = this.load();
+    return cat.providers.find((x) => x.id === ref || x.display_name === ref);
+  }
+
   getModel(id: string): ModelRecord {
-    const m = this.load().models.find((x) => x.id === id);
+    const m = this.findModel(id);
     if (!m) throw new Error(`model not found: ${id}`);
     return m;
   }
 
+  findModel(ref: string): ModelRecord | undefined {
+    const models = this.load().models;
+    return models.find((x) => x.id === ref || x.name === ref || `${x.provider_id}/${x.name}` === ref);
+  }
+
   apiKey(providerId: string): string | undefined {
-    return this.loadSecrets().keys[providerId];
+    return this.loadSecrets().keys[this.getProvider(providerId).id];
+  }
+
+  hasApiKey(providerId: string): boolean {
+    return Boolean(this.loadSecrets().keys[this.getProvider(providerId).id]);
+  }
+
+  setApiKey(providerId: string, apiKey: string): { id: string; api_key_set: true } {
+    const p = this.getProvider(providerId);
+    if (!apiKey.trim()) throw new Error("上游 API Key 不能为空");
+    const secrets = this.loadSecrets();
+    secrets.keys[p.id] = apiKey.trim();
+    this.saveSecrets(secrets);
+    return { id: p.id, api_key_set: true };
+  }
+
+  clearApiKey(providerId: string): { id: string; api_key_set: false } {
+    const p = this.getProvider(providerId);
+    const secrets = this.loadSecrets();
+    delete secrets.keys[p.id];
+    this.saveSecrets(secrets);
+    return { id: p.id, api_key_set: false };
+  }
+
+  updateProvider(input: {
+    provider_id: string;
+    display_name?: string;
+    protocol?: string;
+    base_url?: string;
+  }): ProviderRecord {
+    const cat = this.load();
+    const rec = cat.providers.find((x) => x.id === input.provider_id || x.display_name === input.provider_id);
+    if (!rec) throw new Error(`provider not found: ${input.provider_id}`);
+    if (input.display_name?.trim()) rec.display_name = input.display_name.trim();
+    if (input.protocol) {
+      if (!isProtocol(input.protocol)) throw new Error(`未知协议 ${input.protocol}`);
+      rec.protocol = input.protocol;
+    }
+    if (input.base_url?.trim()) rec.base_url = completeBaseUrl(input.base_url.trim(), rec.protocol);
+    this.save(cat);
+    return rec;
+  }
+
+  removeModel(modelId: string): { id: string; removed: true } {
+    const m = this.getModel(modelId);
+    const cat = this.load();
+    cat.models = cat.models.filter((x) => x.id !== m.id);
+    for (const s of cat.slots) {
+      if (s.model_id === m.id) {
+        s.provider_id = null;
+        s.model_id = null;
+      }
+    }
+    this.save(cat);
+    return { id: m.id, removed: true };
+  }
+
+  removeProvider(providerId: string): { id: string; removed: true; models_removed: number } {
+    const p = this.getProvider(providerId);
+    const cat = this.load();
+    const models = cat.models.filter((m) => m.provider_id === p.id);
+    cat.providers = cat.providers.filter((x) => x.id !== p.id);
+    cat.models = cat.models.filter((m) => m.provider_id !== p.id);
+    for (const s of cat.slots) {
+      if (s.provider_id === p.id) {
+        s.provider_id = null;
+        s.model_id = null;
+      }
+    }
+    this.save(cat);
+    const secrets = this.loadSecrets();
+    delete secrets.keys[p.id];
+    this.saveSecrets(secrets);
+    return { id: p.id, removed: true, models_removed: models.length };
   }
 
   addProvider(input: { display_name: string; protocol: string; base_url: string; api_key: string }): ProviderRecord {

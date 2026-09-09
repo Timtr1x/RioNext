@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { applyFinalizationFlags, makeRuntimeConfig } from "../contracts/config.ts";
+import { applyExecuteLimitFlags, applyFinalizationFlags, makeRuntimeConfig } from "../contracts/config.ts";
 import { Engine, restoreEngineData } from "../controller/engine.ts";
 import { DomainError } from "../domain/errors.ts";
 import { runReactBaseline } from "../eval/baseline-react.ts";
 import { HELP, flagString, parseArgs, resolveCampaignId } from "./args.ts";
+import { loadCampaignSpec } from "./run-spec.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "./format.ts";
 import { handleKaliCommand } from "./kali.ts";
-import { handleProviderCommand } from "./providers.ts";
+import { PROVIDER_HELP, handleProviderCommand } from "./providers.ts";
 
 function dataDir(flags: Record<string, string | boolean>): string {
   if (typeof flags["data-dir"] === "string") return resolve(flags["data-dir"]);
@@ -72,7 +73,12 @@ async function main(): Promise<void> {
   let { cmd } = parsed;
   const { positional, flags } = parsed;
   const json = Boolean(flags.json);
-  if (flags.help || cmd === "help" || cmd === "--help" || cmd === "-h") {
+  if (flags.help || cmd === "--help" || cmd === "-h") {
+    console.log(HELP);
+    return;
+  }
+  if (cmd === "help" && typeof flags.url === "string") cmd = "run";
+  if (cmd === "help") {
     console.log(HELP);
     return;
   }
@@ -108,9 +114,17 @@ async function main(): Promise<void> {
     return;
   }
   if (cmd === "provider" || cmd === "providers") {
+    if (flags.help || positional[0] === "help") {
+      console.log(PROVIDER_HELP);
+      return;
+    }
     try {
       const result = await handleProviderCommand(process.argv.slice(3), flags, dir);
-      emit(result, true);
+      if (result && typeof result === "object" && "help" in result) {
+        console.log(String((result as { help: string }).help));
+        return;
+      }
+      emit(result, json || true);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
@@ -119,7 +133,7 @@ async function main(): Promise<void> {
   }
   let cfg;
   try {
-    cfg = applyFinalizationFlags(makeRuntimeConfig(dir), flags);
+    cfg = applyExecuteLimitFlags(applyFinalizationFlags(makeRuntimeConfig(dir), flags), flags);
   } catch (err) {
     if (err instanceof DomainError) {
       console.error(`${err.code}: ${err.message}`);
@@ -142,9 +156,7 @@ async function main(): Promise<void> {
       return;
     }
     if (cmd === "run") {
-      const specPath = flags.spec;
-      if (typeof specPath !== "string") throw new Error("--spec is required");
-      const spec = JSON.parse(readFileSync(resolve(specPath), "utf8")) as { campaign_id?: string };
+      const spec = loadCampaignSpec(flags, positional, dir) as { campaign_id?: string };
       let created = false;
       try {
         engine.createCampaign(spec);
@@ -160,9 +172,7 @@ async function main(): Promise<void> {
       return;
     }
     if (cmd === "create") {
-      const specPath = flags.spec;
-      if (typeof specPath !== "string") throw new Error("--spec is required");
-      const spec = JSON.parse(readFileSync(resolve(specPath), "utf8")) as unknown;
+      const spec = loadCampaignSpec(flags, positional, dir);
       const rec = engine.createCampaign(spec);
       emit({ created: rec.id, state: rec.state, started: false }, json, `created ${rec.id}  ${rec.state}`);
       return;
@@ -269,6 +279,21 @@ async function main(): Promise<void> {
         break;
       case "operations":
         emit({ operations: engine.listOperations(id) }, json);
+        break;
+      case "observations":
+        emit({ observations: engine.storage.list("observations", id) }, json);
+        break;
+      case "invocations":
+        emit({ invocations: engine.storage.list("invocations", id) }, json);
+        break;
+      case "coverage":
+        emit({ coverage: engine.storage.list("coverage_items", id) }, json);
+        break;
+      case "goals":
+        emit({ goals: engine.storage.list("goals", id) }, json);
+        break;
+      case "artifacts":
+        emit({ artifacts: engine.storage.list("artifacts", id) }, json);
         break;
       case "reconcile": {
         const inv = flagString(flags, "invocation");
