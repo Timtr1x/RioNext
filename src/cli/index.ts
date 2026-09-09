@@ -8,7 +8,7 @@ import { runReactBaseline } from "../eval/baseline-react.ts";
 import { HELP, flagString, parseArgs, resolveCampaignId } from "./args.ts";
 import { loadCampaignSpec } from "./run-spec.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "./format.ts";
-import { handleKaliCommand } from "./kali.ts";
+import { KALI_HELP, handleKaliCommand } from "./kali.ts";
 import { PROVIDER_HELP, handleProviderCommand } from "./providers.ts";
 
 function dataDir(flags: Record<string, string | boolean>): string {
@@ -49,6 +49,18 @@ async function runCampaign(engine: Engine, id: string, flags: Record<string, str
   }
 }
 
+function printHelp(topic?: string): void {
+  if (topic === "provider" || topic === "providers") {
+    console.log(PROVIDER_HELP);
+    return;
+  }
+  if (topic === "kali") {
+    console.log(KALI_HELP);
+    return;
+  }
+  console.log(HELP);
+}
+
 function emit(obj: unknown, json: boolean, text?: string): void {
   if (json) {
     console.log(JSON.stringify(obj, null, 2));
@@ -74,12 +86,12 @@ async function main(): Promise<void> {
   const { positional, flags } = parsed;
   const json = Boolean(flags.json);
   if (flags.help || cmd === "--help" || cmd === "-h") {
-    console.log(HELP);
+    printHelp(positional[0] ?? (cmd === "provider" || cmd === "providers" ? "provider" : cmd === "kali" ? "kali" : undefined));
     return;
   }
   if (cmd === "help" && typeof flags.url === "string") cmd = "run";
   if (cmd === "help") {
-    console.log(HELP);
+    printHelp(positional[0]);
     return;
   }
   const dir = dataDir(flags);
@@ -98,9 +110,18 @@ async function main(): Promise<void> {
     return;
   }
   if (cmd === "kali") {
+    if (flags.help || positional[0] === "help" || positional[0] === "?") {
+      console.log(KALI_HELP);
+      return;
+    }
     try {
       const rest = process.argv.slice(2).filter((a) => a !== "kali" && a !== "campaign");
-      emit(handleKaliCommand(rest), true);
+      const result = handleKaliCommand(rest);
+      if (result && typeof result === "object" && "help" in result) {
+        console.log(String((result as { help: string }).help));
+        return;
+      }
+      emit(result, true);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;

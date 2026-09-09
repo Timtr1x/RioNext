@@ -4,7 +4,7 @@ RioNext 是本地 Decide/Execute 控制器。Decide 串行规划，Execute 一�
 
 默认数据目录是仓库下的 `.rionext/`（可用 `--data-dir` 或 `RIONEXT_DATA` 改）。密钥只放 `.rionext/provider-secrets.json`，不要提交。
 
-Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。下面命令以 Windows 为例。
+Windows 用仓库里的 `.\rionext.cmd`。Linux/macOS 用 `./rionext` 或 `npx rionext`。下面命令以 Windows 为例。命令一览：`.\rionext.cmd ?`，`.\rionext.cmd ? provider`，`.\rionext.cmd ? kali`。
 
 需要 Node >= 22.19.0。先 `npm install`，再 `npx tsc -p tsconfig.json`，CLI 读的是 `dist/`。
 

@@ -6,6 +6,16 @@ import { HELP, parseArgs, resolveCampaignId } from "../../src/cli/args.ts";
 import { applyExecuteLimitFlags, applyFinalizationFlags, makeRuntimeConfig } from "../../src/contracts/config.ts";
 import { formatList, formatProgress, formatStatus, formatVerify } from "../../src/cli/format.ts";
 
+test("parseArgs ? is help and help provider is a topic", () => {
+  const q = parseArgs(["?"]);
+  assert.equal(q.cmd, "help");
+  const topic = parseArgs(["?", "provider"]);
+  assert.equal(topic.cmd, "help");
+  assert.deepEqual(topic.positional, ["provider"]);
+  const flag = parseArgs(["--?"]);
+  assert.equal(flag.flags.help, true);
+});
+
 test("parseArgs treats accept/reject as commands and keeps positional id", () => {
   const a = parseArgs(["accept", "camp_x"]);
   assert.equal(a.cmd, "accept");
@@ -61,6 +71,7 @@ test("formatList and formatVerify are operator text, not JSON", () => {
 });
 
 test("CLI help documents default-on Finalize and the off switch", () => {
+  assert.match(HELP, /rionext \?/);
   assert.match(HELP, /Finalize is on by default/);
   assert.match(HELP, /--no-finalization/);
   assert.match(HELP, /RIONEXT_FINALIZATION=0/);

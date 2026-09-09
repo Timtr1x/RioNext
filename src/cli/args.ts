@@ -9,6 +9,7 @@ const ALIASES: Record<string, string> = {
   accept: "accept",
   reject: "reject",
   continue: "start",
+  "?": "help",
 };
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -29,7 +30,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   for (; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--json") flags.json = true;
-    else if (a === "--help" || a === "-h") flags.help = true;
+    else if (a === "--help" || a === "-h" || a === "--?") flags.help = true;
     else if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
@@ -62,36 +63,68 @@ export function resolveCampaignId(
   throw new Error(`multiple campaigns; pass an id:\n${lines}`);
 }
 
-export const HELP = `RioNext campaign CLI
+export const HELP = `RioNext CLI
 
-  rionext run --url <http(s)://host/>   one command: Kali flag campaign, solver slot, no spec file
-  rionext <http(s)://host/>             same as run --url
-  rionext run --spec <file> [--max-cycles 1000] [--progress-ms 300000] [--finalization|--no-finalization]
-                                     [--max-execute-turns 72] [--max-tool-calls 144]
-                                     create if needed, then start
-                                     Execute Finalize is on by default
-                                     --no-finalization or RIONEXT_FINALIZATION=0 turns it off
-                                     --finalization or RIONEXT_FINALIZATION=1 still force it on
-                                     one Execute fragment defaults to 72 model turns and 144 tool calls
-  rionext list                       campaigns in this data dir
-  rionext status [id]                state, budget, pending flag
-  rionext start [id] [--progress-ms 300000] [--finalization|--no-finalization]
-                                     [--max-execute-turns 72] [--max-tool-calls 144]
-                                     resume Decide/Execute; logs recent calls every 5 min
-                                     (--progress-ms 0 turns that off)
+  rionext ?                  this guide
+  rionext ? provider         provider catalog and keys
+  rionext ? kali             Kali image and clones
+
+Windows: .\\rionext.cmd   Linux/macOS: ./rionext or npx rionext
+Data dir: .rionext  (override --data-dir or RIONEXT_DATA)
+Only one campaign in the dir? omit [id].
+CLI reads dist/; after TypeScript changes run npx tsc -p tsconfig.json.
+
+Start a live Kali flag campaign (solver slot, no spec file):
+
+  rionext run --url http://authorized-target.example/
+  rionext http://authorized-target.example/
+
+Or a spec file:
+
+  rionext run --spec profiles/demo-lab.json
+  rionext run --spec path\\to\\spec.json --progress-ms 60000
+
+run --url uses the solver slot. Same URL again resumes that campaign id.
+--url and --spec cannot be used together.
+
+Campaign:
+
+  rionext list
+  rionext status [id]
+  rionext start [id]         resume Decide/Execute
   rionext pause|resume|cancel [id]
-  rionext accept [id]                human: submitted flag is correct
+  rionext accept [id]        human: submitted flag is correct
   rionext reject [id] --text <why> [--continue]
-                                     human: flag is wrong; inject why
   rionext hint [id] --text <hint>
+  rionext revise-budget [id] --max-calls N --max-tokens N
+  rionext explain-step [id] --step <step_id>
+
+Inspect:
+
   rionext facts|steps|findings|events|operations|report [id]
   rionext observations|invocations|coverage|goals|artifacts [id]
-  rionext provider list|show|add|set|key|rm|model|test|slots|ui
-                               CLI owns catalog and keys; ui is optional
-  rionext kali status|pull|build|protect|smoke
-  rionext health
 
-Default data dir is .rionext (override with --data-dir or RIONEXT_DATA).
-If there is exactly one campaign, [id] can be omitted.
+Provider (keys never printed; see rionext ? provider):
+
+  rionext provider list|show|add|set|key|rm|model|test|slots|ui
+
+Kali (see rionext ? kali):
+
+  rionext health
+  rionext kali status|pull|build|protect|smoke
+
+Flags on run/start:
+
+  --progress-ms 300000       0 turns the 5 min progress log off
+  --max-cycles 1000          controller cycles, not model calls
+  --max-execute-turns 72     one Execute fragment defaults to 72 model turns
+  --max-tool-calls 144       and 144 tool calls
+  --finalization             Execute Finalize is on by default
+  --no-finalization          or RIONEXT_FINALIZATION=0 turns it off
+  --finalization or RIONEXT_FINALIZATION=1 still force it on
+  --json
+
 Budget defaults: 3000 calls, 30_000_000 tokens, 1000 controller cycles.
+Flag claims stop at awaiting_verify until rionext accept.
+More detail: docs/ops.md
 `;

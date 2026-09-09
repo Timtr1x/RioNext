@@ -25,8 +25,23 @@ function sleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+export const KALI_HELP = `rionext kali
+
+  status     docker, rionext-kali:rolling / :master, keeper
+  pull       docker pull kalilinux/kali-rolling
+  build      build rolling+master tags, then protect
+  protect    pin keeper so docker system prune -a cannot drop master
+  smoke      clone, hit a fixture page, docker rm the clone
+
+Campaigns clone the master. cancel docker rm's the clone. Never docker rmi the master.
+entrypoint.sh is bind-mounted from the repo; script edits do not need a rebuild.
+`;
+
 export function handleKaliCommand(argv: string[]): unknown {
   const sub = argv[0] ?? "status";
+  if (sub === "help" || sub === "?" || sub === "--help" || sub === "-h") {
+    return { help: KALI_HELP };
+  }
   const docker = new ProcessDockerCli();
   const rt = new KaliRuntime(docker);
   if (sub === "status") {
